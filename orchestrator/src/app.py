@@ -143,15 +143,15 @@ def index():
     return response
 
 
-@app.route("/suggestions", methods=["POST"])
-def suggestions_endpoint():
-    """
-    Tests the suggestions gRPC service by returning suggested books for given items.
-    """
-    request_data = json.loads(request.data)
-    items = request_data.get("items", [])
-    suggested_books = get_suggestions(items)
-    return {"suggestedBooks": suggested_books}
+# @app.route("/suggestions", methods=["POST"])
+# def suggestions_endpoint():
+#     """
+#     Tests the suggestions gRPC service by returning suggested books for given items.
+#     """
+#     request_data = json.loads(request.data)
+#     items = request_data.get("items", [])
+#     suggested_books = get_suggestions(items)
+#     return {"suggestedBooks": suggested_books}
 
 
 @app.route("/checkout", methods=["POST"])
