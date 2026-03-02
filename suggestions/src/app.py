@@ -13,25 +13,40 @@ import suggestions_pb2_grpc as sg_grpc
 import logging
 import grpc
 from concurrent import futures
+from google import genai
 
 logging.basicConfig(level=logging.INFO)
+
+# Configure Google AI
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
 class SuggestionsService(sg_grpc.SuggestionsServiceServicer):
 
     def GetSuggestions(self, request, context):
-        """Return a static list of book suggestions (not yet context-aware)."""
-        logging.info(f"Getting suggestions for {len(request.items)} items")
+        """Return AI-generated book suggestions based on purchased items."""
+        items = request.items
+        logging.info(f"Getting suggestions for {len(items)} items")
 
-        # Static list of suggested books
-        suggested_books = [
-            sg_pb2.SuggestedBook(
-                bookId="123", title="The Best Book", author="Author 1"
-            ),
-            sg_pb2.SuggestedBook(
-                bookId="456", title="The Second Best Book", author="Author 2"
-            ),
-        ]
+        items_str = ", ".join([f"{item.name} (qty: {item.quantity})" for item in items])
+
+        prompt = f"Based on the user's purchased books: {items_str}, suggest 2 relevant books. For each book, provide title and author. Respond in the format: 1. Title: [title], Author: [author] 2. Title: [title], Author: [author]"
+        response = client.models.generate_content(model='gemma-3-27b-it', contents=prompt)
+        result = response.text.strip()
+
+        # Parse the response
+        suggested_books = []
+        lines = result.split('\n')
+        for line in lines:
+            if line.startswith(('1.', '2.')):
+                parts = line.split('Title:')[1].split('Author:')
+                if len(parts) == 2:
+                    title = parts[0].strip().strip(',')
+                    author = parts[1].strip()
+                    book_id = str(hash(title + author))[:6]  # Simple ID
+                    suggested_books.append(sg_pb2.SuggestedBook(
+                        bookId=book_id, title=title, author=author
+                    ))
 
         logging.info(f"Returning {len(suggested_books)} suggestions")
         return sg_pb2.SuggestionsResponse(books=suggested_books)

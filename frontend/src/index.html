@@ -70,7 +70,7 @@
                 <input type="checkbox" id="terms" name="terms" checked required class="mr-2 border border-gray-300 rounded">
                 <label for="terms" class="text-sm font-medium text-gray-700">Accept Terms and Conditions</label>
             </div>
-            <button type="submit" class="w-full bg-blue-600 text-white font-medium py-2 px-4 rounded-lg hover:bg-blue-700">Submit Order</button>
+            <button type="submit" id="submitButton" class="w-full bg-blue-600 text-white font-medium py-2 px-4 rounded-lg hover:bg-blue-700">Submit Order</button>
         </form>
 
         <div id="response" class="mt-6 p-4 border rounded-lg hidden"></div>
@@ -78,8 +78,8 @@
 
     <script>
         const items = [
-            { name: "Book A", quantity: 1 },
-            { name: "Book B", quantity: 2 }
+            { name: "Distributed systems.", quantity: 1 },
+            { name: "Introduction to gRPC.", quantity: 2 }
         ];
 
         const itemListElement = document.getElementById('itemList');
@@ -92,6 +92,12 @@
 
         document.getElementById('checkoutForm').addEventListener('submit', async function(event) {
             event.preventDefault();
+
+            const submitButton = document.getElementById('submitButton');
+            submitButton.disabled = true;
+            submitButton.textContent = 'Processing...';
+            submitButton.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+            submitButton.classList.add('bg-gray-500', 'cursor-not-allowed');
 
             const formData = new FormData(event.target);
             const data = {
@@ -156,6 +162,11 @@
                 responseDiv.textContent = `Unexpected error occurred: ${error.message}`;
                 responseDiv.className = "mt-6 p-4 border rounded-lg bg-red-100 text-red-700";
                 responseDiv.style.display = 'block';
+            } finally {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Submit Order';
+                submitButton.classList.remove('bg-gray-500', 'cursor-not-allowed');
+                submitButton.classList.add('bg-blue-600', 'hover:bg-blue-700');
             }
         });
 
