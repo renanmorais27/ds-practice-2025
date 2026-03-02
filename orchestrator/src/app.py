@@ -163,7 +163,20 @@ def checkout():
         f"Checkout request received with {len(request_data.get('items', []))} items"
     )
 
-    is_valid, message = verify_transaction(request_data)
+    items = request_data.get("items", [])
+    card_number = request_data.get("creditCard", {}).get("number", "")
+    order_amount = str(sum(item.get("quantity", 0) for item in items))
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future_fraud = executor.submit(detect_fraud, card_number, order_amount)
+        future_verification = executor.submit(verify_transaction, request_data)
+        future_suggestions = executor.submit(get_suggestions, items)
+
+        is_fraud = future_fraud.result()
+        is_valid, message = future_verification.result()
+        suggested_books = future_suggestions.result()
+
     if not is_valid:
         return {
             "orderId": "12345",
@@ -171,19 +184,6 @@ def checkout():
             "reason": message or "Invalid transaction data",
             "suggestedBooks": [],
         }, 200
-
-    # Extract values needed for fraud check
-    card_number = request_data.get("creditCard", {}).get("number", "")
-    order_amount = str(
-        sum(item.get("quantity", 0) for item in request_data.get("items", []))
-    )
-
-    # Call fraud detection gRPC service
-    is_fraud = detect_fraud(card_number=card_number, order_amount=order_amount)
-
-    # Call suggestions gRPC service
-    items = request_data.get("items", [])
-    suggested_books = get_suggestions(items)
 
     order_status_response = {
         "orderId": "12345",
