@@ -10,12 +10,12 @@ The frontend sends checkout requests to an orchestrator, which coordinates trans
 graph TD
     A[User] --> B[Frontend<br/>Port: 8080<br/>Nginx / HTTP]
     B --> C[Orchestrator<br/>Port: 8081<br/>Flask REST API]
-    C -->|1. gRPC| D[Transaction Verification<br/>Port: 50052]
-    C -->|2. gRPC| E[Fraud Detection<br/>Port: 50051]
-    C -->|3. gRPC| F[Suggestions<br/>Port: 50053]
+    C -->|gRPC| E[Fraud Detection<br/>Port: 50051]
+    C -->|gRPC| D[Transaction Verification<br/>Port: 50052]
+    C -->|gRPC| F[Suggestions<br/>Port: 50053]
 ```
 
-All backend services run in Docker containers. The orchestrator calls the three gRPC services **sequentially**: verification must pass before fraud detection runs, and suggestions are fetched last.
+All backend services run in Docker containers. The orchestrator calls the three gRPC services **concurrently** using threading. Transaction verification is checked first; if invalid, the order is denied without fraud check results. Suggestions are fetched concurrently but only included in the response if the transaction is valid.
 
 ## Services
 
@@ -23,8 +23,8 @@ All backend services run in Docker containers. The orchestrator calls the three 
 |---------|------|----------|-------------|
 | **Frontend** | 8080 | HTTP (Nginx) | Static HTML/JS checkout form served by Nginx |
 | **Orchestrator** | 8081 | REST (Flask) | Receives checkout requests, coordinates gRPC calls |
-| **Transaction Verification** | 50052 | gRPC | Validates email, card number, CVV, expiration date, and billing address |
 | **Fraud Detection** | 50051 | gRPC | Flags orders with amount > 1000 or card prefix "999" |
+| **Transaction Verification** | 50052 | gRPC | Validates email, card number, CVV, expiration date, and billing address |
 | **Suggestions** | 50053 | gRPC | Returns a static list of recommended books |
 
 ## System diagram
@@ -38,32 +38,28 @@ sequenceDiagram
     participant FD as Fraud Detection
     participant S as Suggestions
 
-    note right of U: Checkout flow
     U->>F: Submit order form
     F->>O: POST /checkout
-    O->>TV: gRPC VerifyTransaction
-    TV-->>O: is_valid + message
+    par Concurrent gRPC calls
+        O->>TV: gRPC VerifyTransaction
+        O->>FD: gRPC CheckFraud
+        O->>S: gRPC GetSuggestions
+    end
+    TV-->>O: is valid + message
+    FD-->>O: is fraud
+    S-->>O: list of books
     alt Transaction invalid
         O-->>F: Order Denied (reason from TV)
         F-->>U: Yellow/amber error with specific message
+    else Transaction valid
+        alt Fraud detected
+            O-->>F: Order Denied (fraud)
+            F-->>U: Red error with fraud message
+        else Order approved
+            O-->>F: Order Approved and list of suggested books
+            F-->>U: Green success + suggested books
+        end
     end
-    O->>FD: gRPC CheckFraud
-    FD-->>O: is_fraud
-    alt Fraud detected
-        O-->>F: Order Denied (fraud)
-        F-->>U: Red error
-    else Order approved
-        O-->>F: Order Approved
-        F-->>U: Green success
-    end
-
-    note right of U: Suggestions flow
-    U->>F: Click "Test Suggestions"
-    F->>O: POST /suggestions
-    O->>S: gRPC GetSuggestions
-    S-->>O: list of books
-    O-->>F: suggestedBooks
-    F-->>U: Display book list
 ```
 
 ## Validation Rules (Transaction Verification)
