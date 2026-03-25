@@ -2,7 +2,7 @@
 
 Distributed Systems course project @ University of Tartu — an online bookstore checkout system built with a microservices architecture.
 
-The frontend sends checkout requests to an orchestrator, which coordinates transaction verification, fraud detection, and book suggestions via gRPC.
+The frontend sends checkout requests to an orchestrator, which coordinates transaction verification, fraud detection, and book suggestions via gRPC. Approved orders are enqueued and executed by replicated executor services using bully-algorithm leader election.
 
 ## Architecture
 
@@ -15,9 +15,11 @@ graph TD
     C -->|gRPC| F[Suggestions<br/>Port: 50053]
     D -->|gRPC| E
     E -->|gRPC| F
+    C -->|gRPC enqueue| G[OrderQueue<br/>Port: 50054]
+    H[Executor x3<br/>Port: 50055<br/>Bully Election] -->|gRPC dequeue| G
 ```
 
-All backend services run in Docker containers. The orchestrator dispatches parallel init RPCs to all three services, then triggers the execution flow via `StartVerificationFlow` on transaction verification. Backend services communicate directly over gRPC: TV calls FD for fraud checks, FD calls Suggestions for book recommendations. After the terminal result, the orchestrator broadcasts `ClearOrder` to all services.
+All backend services run in Docker containers. The orchestrator dispatches parallel init RPCs to all three verification services, then triggers the execution flow via `StartVerificationFlow` on transaction verification. Backend services communicate directly over gRPC: TV calls FD for fraud checks, FD calls Suggestions for book recommendations. After the terminal result, approved orders are enqueued into OrderQueue, and the orchestrator broadcasts `ClearOrder` to all services. Three Executor replicas elect a leader via the bully algorithm; the leader dequeues and executes orders.
 
 ## Services
 
@@ -28,6 +30,8 @@ All backend services run in Docker containers. The orchestrator dispatches paral
 | **Transaction Verification** | 50052 | gRPC | Validates items, user data, and card format |
 | **Fraud Detection** | 50051 | gRPC | Deterministic fraud analysis on user data and card data |
 | **Suggestions** | 50053 | gRPC | AI-generated book recommendations (Google Gemma 3 27B) with deterministic fallback |
+| **Order Queue** | 50054 | gRPC | Thread-safe FIFO queue for approved orders |
+| **Executor** (x3) | 50055 | gRPC | Replicated order executor with bully-algorithm leader election |
 
 ## Checkout Flow
 
@@ -50,6 +54,8 @@ The checkout uses a two-stage protocol with vector clocks tracking causal order 
 
 Any failure short-circuits downstream events. Suggestions failure is non-fatal (order approved with empty book list). After the terminal result, the orchestrator broadcasts `ClearOrder` with the final vector clock `VCf` — services clear cached data only if their local clock `<= VCf`.
 
+**Stage 3 — Order Execution:** Approved orders are enqueued into the OrderQueue. The orchestrator waits for enqueue confirmation before returning approval to the frontend. Three Executor replicas use the bully algorithm to elect a leader — the leader has exclusive access to dequeue orders and logs their execution. Non-leaders monitor the leader's health and re-trigger election if it becomes unreachable.
+
 ## System Diagram
 
 ```mermaid
@@ -60,6 +66,8 @@ sequenceDiagram
     participant TV as Transaction Verification
     participant FD as Fraud Detection
     participant S as Suggestions
+    participant OQ as Order Queue
+    participant EX as Executor (x3)
 
     U->>F: Submit order form
     F->>O: POST /checkout
@@ -91,6 +99,12 @@ sequenceDiagram
     S-->>FD: books
     FD-->>TV: result + books
     TV-->>O: result + books
+
+    opt Order approved
+        O->>OQ: Enqueue(orderId)
+        OQ-->>O: success
+    end
+
     O-->>F: response + vectorClock + eventTrace
     F-->>U: Order Approved / Denied
 
@@ -99,6 +113,11 @@ sequenceDiagram
         O->>FD: ClearFraudOrder (VCf)
         O->>S: ClearSuggestionsOrder (VCf)
     end
+
+    Note over EX: Bully election (highest ID wins)
+    EX->>OQ: Dequeue (leader only)
+    OQ-->>EX: orderId
+    Note over EX: Order executed
 ```
 
 ## Validation Rules
@@ -163,6 +182,8 @@ orchestrator/                 Flask REST API — coordinates the checkout pipeli
 transaction_verification/     gRPC service — field validation (events a, b, c)
 fraud_detection/              gRPC service — fraud checks (events d, e)
 suggestions/                  gRPC service — AI book recommendations (event f)
+order_queue/                  gRPC service — thread-safe FIFO queue for approved orders
+executor/                     gRPC service — replicated order executor with leader election
 utils/                        Shared protobuf definitions and vector clock helpers
 docs/                         Documentation and project plans
 ```
