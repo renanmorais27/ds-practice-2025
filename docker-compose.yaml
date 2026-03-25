@@ -84,3 +84,56 @@ services:
     volumes:
       - ./utils:/app/utils
       - ./transaction_verification/src:/app/transaction_verification/src
+  order_queue:
+    build:
+      context: ./
+      dockerfile: ./order_queue/Dockerfile
+    ports:
+      - 50054:50054
+    environment:
+      - PYTHONUNBUFFERED=TRUE
+    volumes:
+      - ./utils:/app/utils
+      - ./order_queue/src:/app/order_queue/src
+  executor_1:
+    build:
+      context: ./
+      dockerfile: ./executor/Dockerfile
+    ports:
+      - 50055:50055
+    environment:
+      - PYTHONUNBUFFERED=TRUE
+      - EXECUTOR_ID=1
+      - PEERS=2@executor_2:50055,3@executor_3:50055
+      - ORDER_QUEUE_ADDR=order_queue:50054
+    volumes:
+      - ./utils:/app/utils
+      - ./executor/src:/app/executor/src
+  executor_2:
+    build:
+      context: ./
+      dockerfile: ./executor/Dockerfile
+    ports:
+      - 50056:50055
+    environment:
+      - PYTHONUNBUFFERED=TRUE
+      - EXECUTOR_ID=2
+      - PEERS=1@executor_1:50055,3@executor_3:50055
+      - ORDER_QUEUE_ADDR=order_queue:50054
+    volumes:
+      - ./utils:/app/utils
+      - ./executor/src:/app/executor/src
+  executor_3:
+    build:
+      context: ./
+      dockerfile: ./executor/Dockerfile
+    ports:
+      - 50057:50055
+    environment:
+      - PYTHONUNBUFFERED=TRUE
+      - EXECUTOR_ID=3
+      - PEERS=1@executor_1:50055,2@executor_2:50055
+      - ORDER_QUEUE_ADDR=order_queue:50054
+    volumes:
+      - ./utils:/app/utils
+      - ./executor/src:/app/executor/src
