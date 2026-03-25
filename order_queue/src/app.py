@@ -2,6 +2,7 @@ import sys
 import os
 import threading
 import logging
+from collections import deque
 from concurrent import futures
 
 import grpc
@@ -19,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 class OrderQueueServiceServicer(oq_grpc.OrderQueueServiceServicer):
     def __init__(self):
         self._lock = threading.Lock()
-        self._queue = []
+        self._queue = deque()
 
     def Enqueue(self, request, context):
         with self._lock:
@@ -30,7 +31,7 @@ class OrderQueueServiceServicer(oq_grpc.OrderQueueServiceServicer):
     def Dequeue(self, request, context):
         with self._lock:
             if self._queue:
-                order_id = self._queue.pop(0)
+                order_id = self._queue.popleft()
                 logging.info("Dequeued order %s (queue size: %d)", order_id, len(self._queue))
                 return oq_pb2.DequeueResponse(orderId=order_id, found=True)
             return oq_pb2.DequeueResponse(orderId="", found=False)

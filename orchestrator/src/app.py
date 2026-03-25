@@ -330,15 +330,14 @@ def checkout():
             # Success — enqueue order before responding
             suggested_books = json.loads(books_payload)
 
-            # Enqueue the approved order and wait for confirmation
+            # Enqueue the approved order (best-effort — failure doesn't block checkout)
             try:
                 with grpc.insecure_channel("order_queue:50054") as oq_channel:
                     oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
-                    enqueue_res = oq_stub.Enqueue(
+                    oq_stub.Enqueue(
                         oq_pb2.EnqueueRequest(orderId=order_id), timeout=5
                     )
-                    if enqueue_res.success:
-                        logging.info("[%s] Order enqueued successfully", order_id)
+                    logging.info("[%s] Order enqueued successfully", order_id)
                     vector_clock = tick(vector_clock, "orchestrator")
                     record_event(
                         event_trace, vector_clock, "orchestrator", "order_enqueued",

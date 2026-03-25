@@ -25,9 +25,8 @@ logging.basicConfig(level=logging.INFO)
 
 # Configuration from environment
 EXECUTOR_ID = int(os.environ.get("EXECUTOR_ID", "1"))
-PEERS = os.environ.get("PEERS", "")  # comma-separated "host:port" of other executors
+PEERS = os.environ.get("PEERS", "")  # comma-separated "id@host:port"
 ORDER_QUEUE_ADDR = os.environ.get("ORDER_QUEUE_ADDR", "order_queue:50054")
-EXECUTOR_PORT = int(os.environ.get("EXECUTOR_PORT", "50055"))
 
 ELECTION_TIMEOUT = 2  # seconds to wait for response from higher-ID peers
 DEQUEUE_INTERVAL = 3  # seconds between dequeue attempts
@@ -83,81 +82,92 @@ class ExecutorNode:
     def __init__(self):
         self.executor_id = EXECUTOR_ID
         self.peers = parse_peers()
-        self.leader_id = None
+        self._state_lock = threading.Lock()
+        self._leader_id = None
         self._election_lock = threading.Lock()
         self._electing = False
+
+    # Fix 2: Thread-safe leader_id via property
+    @property
+    def leader_id(self):
+        with self._state_lock:
+            return self._leader_id
+
+    @leader_id.setter
+    def leader_id(self, value):
+        with self._state_lock:
+            self._leader_id = value
 
     def higher_peers(self):
         """Return peers with IDs higher than ours."""
         return [(pid, addr) for pid, addr in self.peers if pid > self.executor_id]
 
-    def all_peers(self):
-        """Return all peers."""
-        return self.peers
-
+    # Fix 1+5: Iterative loop with try/finally for _electing flag
     def start_election(self):
-        """Bully algorithm: contact all higher-ID peers."""
-        with self._election_lock:
-            if self._electing:
-                return
-            self._electing = True
+        """Bully algorithm: contact all higher-ID peers. Iterative, not recursive."""
+        while True:
+            with self._election_lock:
+                if self._electing:
+                    return
+                self._electing = True
 
-        logging.info("[Executor %d] Starting election...", self.executor_id)
-        higher = self.higher_peers()
-
-        if not higher:
-            # No higher-ID peers — declare self as leader
-            self._declare_victory()
-            return
-
-        # Send Election to all higher-ID peers
-        any_alive = False
-        for peer_id, addr in higher:
             try:
-                with grpc.insecure_channel(addr) as channel:
-                    stub = ex_grpc.ExecutorServiceStub(channel)
-                    response = stub.Election(
-                        ex_pb2.ElectionRequest(candidateId=self.executor_id),
-                        timeout=ELECTION_TIMEOUT,
-                    )
-                    if response.alive:
-                        any_alive = True
+                logging.info("[Executor %d] Starting election...", self.executor_id)
+                higher = self.higher_peers()
+
+                if not higher:
+                    self._declare_victory()
+                    return
+
+                # Send Election to all higher-ID peers
+                any_alive = False
+                for peer_id, addr in higher:
+                    try:
+                        with grpc.insecure_channel(addr) as channel:
+                            stub = ex_grpc.ExecutorServiceStub(channel)
+                            response = stub.Election(
+                                ex_pb2.ElectionRequest(candidateId=self.executor_id),
+                                timeout=ELECTION_TIMEOUT,
+                            )
+                            if response.alive:
+                                any_alive = True
+                                logging.info(
+                                    "[Executor %d] Peer %d is alive, standing down",
+                                    self.executor_id, peer_id,
+                                )
+                    except Exception:
                         logging.info(
-                            "[Executor %d] Peer %d is alive, standing down",
+                            "[Executor %d] Peer %d unreachable",
                             self.executor_id, peer_id,
                         )
-            except Exception:
-                logging.info(
-                    "[Executor %d] Peer %d unreachable",
-                    self.executor_id, peer_id,
-                )
 
-        if not any_alive:
-            # No higher-ID peer responded — we are the leader
-            self._declare_victory()
-        else:
-            # Wait for a Victory message from a higher-ID peer
-            logging.info(
-                "[Executor %d] Waiting for Victory from higher-ID peer...",
-                self.executor_id,
-            )
-            with self._election_lock:
-                self._electing = False
-            # Wait up to 2x election timeout for Victory
+                if not any_alive:
+                    self._declare_victory()
+                    return
+
+                # Wait for a Victory message from a higher-ID peer
+                logging.info(
+                    "[Executor %d] Waiting for Victory from higher-ID peer...",
+                    self.executor_id,
+                )
+            finally:
+                with self._election_lock:
+                    self._electing = False
+
+            # Sleep outside the try/finally so _electing is already reset
             time.sleep(ELECTION_TIMEOUT * 2)
-            if self.leader_id is None:
-                # No victory received — retry election
-                self.start_election()
+            if self.leader_id is not None:
+                return  # Victory received, done
+            # Otherwise loop back to retry
 
     def _declare_victory(self):
         """Broadcast Victory to all peers and become leader."""
         self.leader_id = self.executor_id
-        with self._election_lock:
-            self._electing = False
 
         logging.info("[Executor %d] I am the leader!", self.executor_id)
 
-        for peer_id, addr in self.all_peers():
+        # Fix 7: Use self.peers directly instead of all_peers()
+        for peer_id, addr in self.peers:
             try:
                 with grpc.insecure_channel(addr) as channel:
                     stub = ex_grpc.ExecutorServiceStub(channel)
@@ -171,18 +181,19 @@ class ExecutorNode:
                     self.executor_id, peer_id,
                 )
 
+    # Fix 4: Use Victory probe instead of Election for liveness check
     def check_leader_alive(self):
-        """Check if the current leader is still reachable."""
+        """Check if the current leader is still reachable via a Victory probe."""
         if self.leader_id is None or self.leader_id == self.executor_id:
             return True
 
-        for peer_id, addr in self.all_peers():
+        for peer_id, addr in self.peers:
             if peer_id == self.leader_id:
                 try:
                     with grpc.insecure_channel(addr) as channel:
                         stub = ex_grpc.ExecutorServiceStub(channel)
-                        stub.Election(
-                            ex_pb2.ElectionRequest(candidateId=self.executor_id),
+                        stub.Victory(
+                            ex_pb2.VictoryRequest(leaderId=self.leader_id),
                             timeout=ELECTION_TIMEOUT,
                         )
                     return True
@@ -194,13 +205,15 @@ class ExecutorNode:
                     return False
         return False
 
+    # Fix 8: Reuse gRPC channel in leader dequeue loop
     def run_leader_loop(self):
         """Leader: repeatedly dequeue and execute orders."""
         logging.info("[Executor %d] Running as leader, dequeuing orders...", self.executor_id)
-        while self.leader_id == self.executor_id:
-            try:
-                with grpc.insecure_channel(ORDER_QUEUE_ADDR) as channel:
-                    stub = oq_grpc.OrderQueueServiceStub(channel)
+        channel = grpc.insecure_channel(ORDER_QUEUE_ADDR)
+        stub = oq_grpc.OrderQueueServiceStub(channel)
+        try:
+            while self.leader_id == self.executor_id:
+                try:
                     response = stub.Dequeue(oq_pb2.DequeueRequest(), timeout=5)
                     if response.found:
                         logging.info(
@@ -211,11 +224,13 @@ class ExecutorNode:
                         logging.debug(
                             "[Executor %d] Queue empty, waiting...", self.executor_id,
                         )
-            except Exception as e:
-                logging.error(
-                    "[Executor %d] Error dequeuing: %s", self.executor_id, e,
-                )
-            time.sleep(DEQUEUE_INTERVAL)
+                except Exception as e:
+                    logging.error(
+                        "[Executor %d] Error dequeuing: %s", self.executor_id, e,
+                    )
+                time.sleep(DEQUEUE_INTERVAL)
+        finally:
+            channel.close()
 
     def run_follower_loop(self):
         """Non-leader: periodically check if leader is alive."""
@@ -253,10 +268,10 @@ def serve():
     # Start gRPC server for incoming Election/Victory RPCs
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     ex_grpc.add_ExecutorServiceServicer_to_server(ExecutorServiceServicer(node), server)
-    server.add_insecure_port(f"[::]:{EXECUTOR_PORT}")
+    server.add_insecure_port("[::]:50055")
     logging.info(
-        "Executor %d listening on port %d (peers: %s, queue: %s)",
-        EXECUTOR_ID, EXECUTOR_PORT, PEERS, ORDER_QUEUE_ADDR,
+        "Executor %d listening on port 50055 (peers: %s, queue: %s)",
+        EXECUTOR_ID, PEERS, ORDER_QUEUE_ADDR,
     )
     server.start()
 
