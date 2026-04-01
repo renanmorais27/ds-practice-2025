@@ -3,5 +3,7 @@
         "./utils/pb/fraud_detection",
         "./utils/pb/transaction_verification",
         "./utils/pb/suggestions",
+        "./utils/pb/executor",
+        "./utils/pb/order_queue",
     ],
 }

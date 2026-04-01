@@ -334,7 +334,7 @@ def checkout():
             try:
                 with grpc.insecure_channel("order_queue:50054") as oq_channel:
                     oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
-                    oq_stub.Enqueue(
+                    enqueue_res = oq_stub.Enqueue(
                         oq_pb2.EnqueueRequest(orderId=order_id), timeout=5
                     )
                     if not enqueue_res.success:
