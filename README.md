@@ -4,6 +4,35 @@ Distributed Systems course project @ University of Tartu — an online bookstore
 
 The frontend sends checkout requests to an orchestrator, which coordinates transaction verification, fraud detection, and book suggestions via gRPC. Approved orders are enqueued and executed by replicated executor services using bully-algorithm leader election.
 
+## System Model
+
+The following is a system model description using the concepts described in the lecture.
+
+- Communication
+    - Frontend → Orchestrator: HTTP POST `/checkout`.
+    - Orchestrator → backend services (TV, FD, S, OQ): gRPC protocol.
+    - Orchestrator sends parallel initialization RPCs and uses gRPC metadata to carry vector clocks and event traces; services return vector clock and trace in metadata.
+    - RPC calls are wrapped in try/except and use explicit timeouts in some places (e.g., enqueue), so the implementation treats RPCs as possibly failing.
+
+- Architecture
+    - Components: Frontend, Orchestrator, Transaction Verification (TV), Fraud Detection (FD), Suggestions (S), Order Queue (OQ), Executor replicas (EX).
+    - Responsibilities:
+        - Orchestrator: coordinates the pipeline, generates `OrderID`, merges clocks, enqueues approved orders.
+        - TV: caches per-order data, runs the verification flow and calls FD when needed.
+        - FD: runs fraud checks and calls S; suggestions are optional and handled as non-fatal on failure.
+        - S: generates suggestions via GenAI when available; falls back to a static list on error.
+        - OQ: an in-memory FIFO queue implemented with a `deque`.
+        - EX: replicas use a bully-style election; the elected leader polls OQ and performs dequeues.
+
+- Timing
+    - The code uses time-based mechanisms: RPC timeouts, election/heartbeat intervals, dequeue interval.
+    - Vector clocks are used to record causal order and to determine safe cleanup. Clear handlers remove cached data when the local clock is less or equal than the final clock.
+
+- Failures
+    - The implementation handles RPC exceptions and return errors; suggestions failure is explicitly non-fatal.
+    - Executor election tolerates unreachable peers and re-elects a leader when needed.
+
+
 ## Architecture
 
 ```mermaid
