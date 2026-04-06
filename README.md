@@ -120,6 +120,24 @@ sequenceDiagram
     Note over EX: Order executed
 ```
 
+## Leader Election (Bully Algorithm)
+
+The bully algorithm scales to any number of replicas (N). Each replica has a unique numeric ID; the highest-alive ID acts as the leader. When a replica `i` detects the leader is down it:
+
+- Sends an `Election` message to all replicas with ID > `i`.
+- If no higher-ID replica responds, `i` broadcasts `Victory` and becomes the leader.
+- If any higher-ID replies with `OK`, `i` stops and waits for a `Victory` announcement from the higher-ID winner.
+
+```mermaid
+flowchart TD
+    A[Replica i detects leader failure] --> B{Any replicas with ID > i?}
+    B -- No --> C[Broadcast Victory ID: i, becomes leader]
+    B -- Yes --> D[Send Election to all j where j > i]
+    D --> E{Receive any OK responses?}
+    E -- Yes --> F[Wait for Victory announcement]
+    E -- No --> C
+```
+
 ## Validation Rules
 
 | Field | Rule |
