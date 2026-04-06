@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package executor;
+
+service ExecutorService {
+  rpc Election(ElectionRequest) returns (ElectionResponse);
+  rpc Victory(VictoryRequest) returns (VictoryResponse);
+}
+
+message ElectionRequest {
+  int32 candidateId = 1;
+}
+
+message ElectionResponse {
+  bool alive = 1;
+}
+
+message VictoryRequest {
+  int32 leaderId = 1;
+}
+
+message VictoryResponse {
+  bool acknowledged = 1;
+}

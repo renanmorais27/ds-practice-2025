@@ -5,6 +5,8 @@ SERVICES = (
     "transaction_verification",
     "fraud_detection",
     "suggestions",
+    "order_queue",
+    "executor",
 )
 
 VECTOR_CLOCK_METADATA_KEY = "x-vector-clock"

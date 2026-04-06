@@ -20,6 +20,11 @@ sys.path.insert(0, tv_grpc_path)
 import transaction_verification_pb2 as tv_pb2
 import transaction_verification_pb2_grpc as tv_grpc
 
+oq_grpc_path = os.path.abspath(os.path.join(FILE, "../../../utils/pb/order_queue"))
+sys.path.insert(0, oq_grpc_path)
+import order_queue_pb2 as oq_pb2
+import order_queue_pb2_grpc as oq_grpc
+
 from flask import Flask, request
 from flask_cors import CORS
 import json
@@ -322,8 +327,39 @@ def checkout():
                 broadcast_clear(order_id, vector_clock)
                 return result
 
-            # Success
+            # Success — enqueue order before responding
             suggested_books = json.loads(books_payload)
+
+            # Enqueue the approved order and require confirmation before responding.
+            try:
+                with grpc.insecure_channel("order_queue:50054") as oq_channel:
+                    oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
+                    enqueue_res = oq_stub.Enqueue(
+                        oq_pb2.EnqueueRequest(orderId=order_id), timeout=5
+                    )
+                    if not enqueue_res.success:
+                        raise RuntimeError("Order queue rejected enqueue")
+
+                logging.info("[%s] Order enqueued successfully", order_id)
+                vector_clock = tick(vector_clock, "orchestrator")
+                record_event(
+                    event_trace, vector_clock, "orchestrator", "order_enqueued",
+                )
+            except Exception as enq_exc:
+                logging.error("[%s] Failed to enqueue order: %s", order_id, enq_exc)
+                vector_clock = tick(vector_clock, "orchestrator")
+                record_event(
+                    event_trace, vector_clock, "orchestrator", "order_enqueue_failed",
+                )
+                result = _deny_response(
+                    order_id,
+                    f"Order could not be enqueued: {enq_exc}",
+                    vector_clock,
+                    event_trace,
+                )
+                broadcast_clear(order_id, vector_clock)
+                return result
+
             record_event(
                 event_trace, vector_clock, "orchestrator", "checkout_response_ready",
             )
