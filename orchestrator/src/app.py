@@ -25,6 +25,11 @@ sys.path.insert(0, oq_grpc_path)
 import order_queue_pb2 as oq_pb2
 import order_queue_pb2_grpc as oq_grpc
 
+db_grpc_path = os.path.abspath(os.path.join(FILE, "../../../utils/pb/books_database"))
+sys.path.insert(0, db_grpc_path)
+import books_database_pb2 as db_pb2
+import books_database_pb2_grpc as db_grpc
+
 from flask import Flask, request
 from flask_cors import CORS
 import json
@@ -327,15 +332,45 @@ def checkout():
                 broadcast_clear(order_id, vector_clock)
                 return result
 
-            # Success — enqueue order before responding
+            # Success — check stock before enqueueing
             suggested_books = json.loads(books_payload)
+
+            items = request_data.get("items", [])
+            try:
+                with grpc.insecure_channel("books_db_1:50060") as db_channel:
+                    db_stub = db_grpc.BooksDatabaseStub(db_channel)
+                    for item in items:
+                        title = item.get("name", "")
+                        quantity = item.get("quantity", 0)
+                        resp = db_stub.Read(db_pb2.ReadRequest(title=title), timeout=5)
+                        if resp.stock < quantity:
+                            vector_clock = tick(vector_clock, "orchestrator")
+                            record_event(
+                                event_trace, vector_clock, "orchestrator", "stock_check_failed",
+                            )
+                            result = _deny_response(
+                                order_id,
+                                f"Insufficient stock for '{title}' (available: {resp.stock}, requested: {quantity})",
+                                vector_clock,
+                                event_trace,
+                            )
+                            broadcast_clear(order_id, vector_clock)
+                            return result
+                vector_clock = tick(vector_clock, "orchestrator")
+                record_event(event_trace, vector_clock, "orchestrator", "stock_check_passed")
+            except Exception as stock_exc:
+                logging.warning("[%s] Stock check failed (non-blocking): %s", order_id, stock_exc)
 
             # Enqueue the approved order and require confirmation before responding.
             try:
+                oq_items = [
+                    oq_pb2.BookItem(title=item.get("name", ""), quantity=item.get("quantity", 0))
+                    for item in items
+                ]
                 with grpc.insecure_channel("order_queue:50054") as oq_channel:
                     oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
                     enqueue_res = oq_stub.Enqueue(
-                        oq_pb2.EnqueueRequest(orderId=order_id), timeout=5
+                        oq_pb2.EnqueueRequest(orderId=order_id, items=oq_items), timeout=5
                     )
                     if not enqueue_res.success:
                         raise RuntimeError("Order queue rejected enqueue")
