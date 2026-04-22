@@ -41,6 +41,23 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
         logging.info("Write '%s' = %d", request.title, request.new_stock)
         return db_pb2.WriteResponse(success=True)
 
+    def TryDecrement(self, request, context):
+        with self._lock:
+            current = self.store.get(request.title, 0)
+            if current < request.quantity:
+                logging.info("TryDecrement '%s': insufficient (have %d, need %d)", request.title, current, request.quantity)
+                return db_pb2.TryDecrementResponse(success=False)
+            self.store[request.title] = current - request.quantity
+        logging.info("TryDecrement '%s': %d -> %d", request.title, current, current - request.quantity)
+        return db_pb2.TryDecrementResponse(success=True)
+
+    def Increment(self, request, context):
+        with self._lock:
+            current = self.store.get(request.title, 0)
+            self.store[request.title] = current + request.quantity
+        logging.info("Increment '%s': %d -> %d", request.title, current, current + request.quantity)
+        return db_pb2.IncrementResponse(success=True)
+
 
 class PrimaryReplica(BooksDatabaseServicer):
     """Primary replica: handles all writes and propagates them to backup replicas."""
@@ -49,22 +66,40 @@ class PrimaryReplica(BooksDatabaseServicer):
         super().__init__()
         self._backup_addrs = [a.strip() for a in backup_addrs if a.strip()]
 
-    def Write(self, request, context):
-        # Write locally first
-        with self._lock:
-            self.store[request.title] = request.new_stock
-        logging.info("Write '%s' = %d (primary)", request.title, request.new_stock)
-
-        # Propagate to backups
+    def _replicate(self, method_name, request):
         for addr in self._backup_addrs:
             try:
                 with grpc.insecure_channel(addr) as channel:
                     stub = db_grpc.BooksDatabaseStub(channel)
-                    stub.Write(request, timeout=3)
+                    getattr(stub, method_name)(request, timeout=3)
             except Exception as e:
-                logging.warning("Failed to replicate to backup %s: %s", addr, e)
+                logging.warning("Failed to replicate %s to backup %s: %s", method_name, addr, e)
 
+    def Write(self, request, context):
+        with self._lock:
+            self.store[request.title] = request.new_stock
+        logging.info("Write '%s' = %d (primary)", request.title, request.new_stock)
+        self._replicate("Write", request)
         return db_pb2.WriteResponse(success=True)
+
+    def TryDecrement(self, request, context):
+        with self._lock:
+            current = self.store.get(request.title, 0)
+            if current < request.quantity:
+                logging.info("TryDecrement '%s': insufficient (have %d, need %d) (primary)", request.title, current, request.quantity)
+                return db_pb2.TryDecrementResponse(success=False)
+            self.store[request.title] = current - request.quantity
+        logging.info("TryDecrement '%s': %d -> %d (primary)", request.title, current, current - request.quantity)
+        self._replicate("TryDecrement", request)
+        return db_pb2.TryDecrementResponse(success=True)
+
+    def Increment(self, request, context):
+        with self._lock:
+            current = self.store.get(request.title, 0)
+            self.store[request.title] = current + request.quantity
+        logging.info("Increment '%s': %d -> %d (primary)", request.title, current, current + request.quantity)
+        self._replicate("Increment", request)
+        return db_pb2.IncrementResponse(success=True)
 
 
 def serve():

@@ -29,3 +29,31 @@ class WriteResponse(_message.Message):
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     success: bool
     def __init__(self, success: bool = ...) -> None: ...
+
+class TryDecrementRequest(_message.Message):
+    __slots__ = ("title", "quantity")
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    QUANTITY_FIELD_NUMBER: _ClassVar[int]
+    title: str
+    quantity: int
+    def __init__(self, title: _Optional[str] = ..., quantity: _Optional[int] = ...) -> None: ...
+
+class TryDecrementResponse(_message.Message):
+    __slots__ = ("success",)
+    SUCCESS_FIELD_NUMBER: _ClassVar[int]
+    success: bool
+    def __init__(self, success: bool = ...) -> None: ...
+
+class IncrementRequest(_message.Message):
+    __slots__ = ("title", "quantity")
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    QUANTITY_FIELD_NUMBER: _ClassVar[int]
+    title: str
+    quantity: int
+    def __init__(self, title: _Optional[str] = ..., quantity: _Optional[int] = ...) -> None: ...
+
+class IncrementResponse(_message.Message):
+    __slots__ = ("success",)
+    SUCCESS_FIELD_NUMBER: _ClassVar[int]
+    success: bool
+    def __init__(self, success: bool = ...) -> None: ...

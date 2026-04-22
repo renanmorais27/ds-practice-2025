@@ -21,11 +21,6 @@ sys.path.insert(0, oq_grpc_path)
 import order_queue_pb2 as oq_pb2
 import order_queue_pb2_grpc as oq_grpc
 
-# Import books_database proto stubs
-db_grpc_path = os.path.abspath(os.path.join(FILE, "../../../utils/pb/books_database"))
-sys.path.insert(0, db_grpc_path)
-import books_database_pb2 as db_pb2
-import books_database_pb2_grpc as db_grpc
 
 logging.basicConfig(level=logging.INFO)
 
@@ -33,7 +28,6 @@ logging.basicConfig(level=logging.INFO)
 EXECUTOR_ID = int(os.environ.get("EXECUTOR_ID", "1"))
 PEERS = os.environ.get("PEERS", "")  # comma-separated "id@host:port"
 ORDER_QUEUE_ADDR = os.environ.get("ORDER_QUEUE_ADDR", "order_queue:50054")
-BOOKS_DB_ADDR = os.environ.get("BOOKS_DB_ADDR", "books_db_1:50060")
 
 ELECTION_TIMEOUT = 2  # seconds to wait for response from higher-ID peers
 DEQUEUE_INTERVAL = 3  # seconds between dequeue attempts
@@ -213,49 +207,19 @@ class ExecutorNode:
         return False
 
     def _execute_order(self, order_id, items, db_stub):
-        """Execute a single order: read stock, validate, and write updated stock."""
+        """Confirm a pre-approved order. Stock was already atomically reserved by the orchestrator."""
         for item in items:
-            title = item.title
-            quantity = item.quantity
-            try:
-                read_resp = db_stub.Read(db_pb2.ReadRequest(title=title), timeout=5)
-                current_stock = read_resp.stock
-                if current_stock < quantity:
-                    logging.warning(
-                        "[Executor %d] Order %s: insufficient stock for '%s' (have %d, need %d)",
-                        self.executor_id, order_id, title, current_stock, quantity,
-                    )
-                    return False
-                new_stock = current_stock - quantity
-                write_resp = db_stub.Write(
-                    db_pb2.WriteRequest(title=title, new_stock=new_stock), timeout=5
-                )
-                if not write_resp.success:
-                    logging.error(
-                        "[Executor %d] Order %s: write failed for '%s'",
-                        self.executor_id, order_id, title,
-                    )
-                    return False
-                logging.info(
-                    "[Executor %d] Order %s: '%s' stock %d -> %d",
-                    self.executor_id, order_id, title, current_stock, new_stock,
-                )
-            except Exception as e:
-                logging.error(
-                    "[Executor %d] Order %s: database error for '%s': %s",
-                    self.executor_id, order_id, title, e,
-                )
-                return False
+            logging.info(
+                "[Executor %d] Order %s: confirmed '%s' x%d (stock already reserved)",
+                self.executor_id, order_id, item.title, item.quantity,
+            )
         return True
 
-    # Fix 8: Reuse gRPC channel in leader dequeue loop
     def run_leader_loop(self):
         """Leader: repeatedly dequeue and execute orders."""
         logging.info("[Executor %d] Running as leader, dequeuing orders...", self.executor_id)
         oq_channel = grpc.insecure_channel(ORDER_QUEUE_ADDR)
         oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
-        db_channel = grpc.insecure_channel(BOOKS_DB_ADDR)
-        db_stub = db_grpc.BooksDatabaseStub(db_channel)
         try:
             while self.leader_id == self.executor_id:
                 try:
@@ -265,11 +229,10 @@ class ExecutorNode:
                             "[Executor %d] Executing order %s (%d items)...",
                             self.executor_id, response.orderId, len(response.items),
                         )
-                        success = self._execute_order(response.orderId, response.items, db_stub)
+                        self._execute_order(response.orderId, response.items, None)
                         logging.info(
-                            "[Executor %d] Order %s %s",
+                            "[Executor %d] Order %s completed",
                             self.executor_id, response.orderId,
-                            "completed" if success else "failed (insufficient stock)",
                         )
                     else:
                         logging.debug(
@@ -282,7 +245,6 @@ class ExecutorNode:
                 time.sleep(DEQUEUE_INTERVAL)
         finally:
             oq_channel.close()
-            db_channel.close()
 
     def run_follower_loop(self):
         """Non-leader: periodically check if leader is alive."""

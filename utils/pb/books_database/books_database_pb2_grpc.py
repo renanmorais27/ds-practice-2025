@@ -44,6 +44,16 @@ class BooksDatabaseStub(object):
                 request_serializer=books__database__pb2.WriteRequest.SerializeToString,
                 response_deserializer=books__database__pb2.WriteResponse.FromString,
                 _registered_method=True)
+        self.TryDecrement = channel.unary_unary(
+                '/books_database.BooksDatabase/TryDecrement',
+                request_serializer=books__database__pb2.TryDecrementRequest.SerializeToString,
+                response_deserializer=books__database__pb2.TryDecrementResponse.FromString,
+                _registered_method=True)
+        self.Increment = channel.unary_unary(
+                '/books_database.BooksDatabase/Increment',
+                request_serializer=books__database__pb2.IncrementRequest.SerializeToString,
+                response_deserializer=books__database__pb2.IncrementResponse.FromString,
+                _registered_method=True)
 
 
 class BooksDatabaseServicer(object):
@@ -61,6 +71,18 @@ class BooksDatabaseServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def TryDecrement(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Increment(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BooksDatabaseServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -73,6 +95,16 @@ def add_BooksDatabaseServicer_to_server(servicer, server):
                     servicer.Write,
                     request_deserializer=books__database__pb2.WriteRequest.FromString,
                     response_serializer=books__database__pb2.WriteResponse.SerializeToString,
+            ),
+            'TryDecrement': grpc.unary_unary_rpc_method_handler(
+                    servicer.TryDecrement,
+                    request_deserializer=books__database__pb2.TryDecrementRequest.FromString,
+                    response_serializer=books__database__pb2.TryDecrementResponse.SerializeToString,
+            ),
+            'Increment': grpc.unary_unary_rpc_method_handler(
+                    servicer.Increment,
+                    request_deserializer=books__database__pb2.IncrementRequest.FromString,
+                    response_serializer=books__database__pb2.IncrementResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -129,6 +161,60 @@ class BooksDatabase(object):
             '/books_database.BooksDatabase/Write',
             books__database__pb2.WriteRequest.SerializeToString,
             books__database__pb2.WriteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TryDecrement(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/books_database.BooksDatabase/TryDecrement',
+            books__database__pb2.TryDecrementRequest.SerializeToString,
+            books__database__pb2.TryDecrementResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Increment(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/books_database.BooksDatabase/Increment',
+            books__database__pb2.IncrementRequest.SerializeToString,
+            books__database__pb2.IncrementResponse.FromString,
             options,
             channel_credentials,
             insecure,

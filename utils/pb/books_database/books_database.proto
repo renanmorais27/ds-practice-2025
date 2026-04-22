@@ -5,6 +5,8 @@ package books_database;
 service BooksDatabase {
   rpc Read (ReadRequest) returns (ReadResponse);
   rpc Write (WriteRequest) returns (WriteResponse);
+  rpc TryDecrement (TryDecrementRequest) returns (TryDecrementResponse);
+  rpc Increment (IncrementRequest) returns (IncrementResponse);
 }
 
 message ReadRequest {
@@ -21,5 +23,23 @@ message WriteRequest {
 }
 
 message WriteResponse {
+  bool success = 1;
+}
+
+message TryDecrementRequest {
+  string title = 1;
+  int32 quantity = 2;
+}
+
+message TryDecrementResponse {
+  bool success = 1;
+}
+
+message IncrementRequest {
+  string title = 1;
+  int32 quantity = 2;
+}
+
+message IncrementResponse {
   bool success = 1;
 }
