@@ -95,6 +95,18 @@ services:
     volumes:
       - ./utils:/app/utils
       - ./order_queue/src:/app/order_queue/src
+  payment:
+    build:
+      context: ./
+      dockerfile: ./payment/Dockerfile
+    ports:
+      - 50058:50058
+    environment:
+      - PYTHONUNBUFFERED=TRUE
+      - PYTHONFILE=/app/payment/src/app.py
+    volumes:
+      - ./utils:/app/utils
+      - ./payment/src:/app/payment/src
   books_db_1:
     build:
       context: ./
@@ -106,6 +118,7 @@ services:
       - PYTHONFILE=/app/books_database/src/app.py
       - REPLICA_ROLE=primary
       - BACKUP_ADDRS=books_db_2:50060,books_db_3:50060
+      - BOOKS_DB_JOURNAL=/tmp/books_db_journal.json
     volumes:
       - ./utils:/app/utils
       - ./books_database/src:/app/books_database/src
@@ -147,6 +160,8 @@ services:
       - PEERS=2@executor_2:50055,3@executor_3:50055
       - ORDER_QUEUE_ADDR=order_queue:50054
       - BOOKS_DB_ADDR=books_db_1:50060
+      - PAYMENT_ADDR=payment:50058
+      - ORCHESTRATOR_OUTCOME_URL=http://orchestrator:5000/internal/order-outcome
     volumes:
       - ./utils:/app/utils
       - ./executor/src:/app/executor/src
@@ -162,6 +177,8 @@ services:
       - PEERS=1@executor_1:50055,3@executor_3:50055
       - ORDER_QUEUE_ADDR=order_queue:50054
       - BOOKS_DB_ADDR=books_db_1:50060
+      - PAYMENT_ADDR=payment:50058
+      - ORCHESTRATOR_OUTCOME_URL=http://orchestrator:5000/internal/order-outcome
     volumes:
       - ./utils:/app/utils
       - ./executor/src:/app/executor/src
@@ -177,6 +194,8 @@ services:
       - PEERS=1@executor_1:50055,2@executor_2:50055
       - ORDER_QUEUE_ADDR=order_queue:50054
       - BOOKS_DB_ADDR=books_db_1:50060
+      - PAYMENT_ADDR=payment:50058
+      - ORCHESTRATOR_OUTCOME_URL=http://orchestrator:5000/internal/order-outcome
     volumes:
       - ./utils:/app/utils
       - ./executor/src:/app/executor/src

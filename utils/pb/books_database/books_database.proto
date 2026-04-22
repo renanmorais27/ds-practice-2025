@@ -3,10 +3,14 @@ syntax = "proto3";
 package books_database;
 
 service BooksDatabase {
-  rpc Read (ReadRequest) returns (ReadResponse);
-  rpc Write (WriteRequest) returns (WriteResponse);
-  rpc TryDecrement (TryDecrementRequest) returns (TryDecrementResponse);
-  rpc Increment (IncrementRequest) returns (IncrementResponse);
+  rpc Read      (ReadRequest)         returns (ReadResponse);
+  rpc Write     (WriteRequest)        returns (WriteResponse);
+  rpc Increment (IncrementRequest)    returns (IncrementResponse);
+
+  // 2PC participant RPCs driven by the executor coordinator.
+  rpc Prepare (PrepareStockRequest) returns (PrepareStockResponse);
+  rpc Commit  (CommitRequest)       returns (CommitResponse);
+  rpc Abort   (AbortRequest)        returns (AbortResponse);
 }
 
 message ReadRequest {
@@ -26,15 +30,6 @@ message WriteResponse {
   bool success = 1;
 }
 
-message TryDecrementRequest {
-  string title = 1;
-  int32 quantity = 2;
-}
-
-message TryDecrementResponse {
-  bool success = 1;
-}
-
 message IncrementRequest {
   string title = 1;
   int32 quantity = 2;
@@ -42,4 +37,35 @@ message IncrementRequest {
 
 message IncrementResponse {
   bool success = 1;
+}
+
+message StockItem {
+  string title = 1;
+  int32  quantity = 2;
+}
+
+message PrepareStockRequest {
+  string   order_id = 1;
+  repeated StockItem items = 2;
+}
+
+message PrepareStockResponse {
+  bool   ready  = 1;
+  string reason = 2;
+}
+
+message CommitRequest {
+  string order_id = 1;
+}
+
+message CommitResponse {
+  bool success = 1;
+}
+
+message AbortRequest {
+  string order_id = 1;
+}
+
+message AbortResponse {
+  bool aborted = 1;
 }
