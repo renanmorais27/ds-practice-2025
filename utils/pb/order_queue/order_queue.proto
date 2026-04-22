@@ -7,8 +7,14 @@ service OrderQueueService {
   rpc Dequeue(DequeueRequest) returns (DequeueResponse);
 }
 
+message BookItem {
+  string title = 1;
+  int32 quantity = 2;
+}
+
 message EnqueueRequest {
   string orderId = 1;
+  repeated BookItem items = 2;
 }
 
 message EnqueueResponse {
@@ -20,4 +26,5 @@ message DequeueRequest {}
 message DequeueResponse {
   string orderId = 1;
   bool found = 2;
+  repeated BookItem items = 3;
 }

@@ -21,6 +21,7 @@ sys.path.insert(0, oq_grpc_path)
 import order_queue_pb2 as oq_pb2
 import order_queue_pb2_grpc as oq_grpc
 
+
 logging.basicConfig(level=logging.INFO)
 
 # Configuration from environment
@@ -205,19 +206,32 @@ class ExecutorNode:
                     return False
         return False
 
-    # Fix 8: Reuse gRPC channel in leader dequeue loop
+    def _execute_order(self, order_id, items, db_stub):
+        """Confirm a pre-approved order. Stock was already atomically reserved by the orchestrator."""
+        for item in items:
+            logging.info(
+                "[Executor %d] Order %s: confirmed '%s' x%d (stock already reserved)",
+                self.executor_id, order_id, item.title, item.quantity,
+            )
+        return True
+
     def run_leader_loop(self):
         """Leader: repeatedly dequeue and execute orders."""
         logging.info("[Executor %d] Running as leader, dequeuing orders...", self.executor_id)
-        channel = grpc.insecure_channel(ORDER_QUEUE_ADDR)
-        stub = oq_grpc.OrderQueueServiceStub(channel)
+        oq_channel = grpc.insecure_channel(ORDER_QUEUE_ADDR)
+        oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
         try:
             while self.leader_id == self.executor_id:
                 try:
-                    response = stub.Dequeue(oq_pb2.DequeueRequest(), timeout=5)
+                    response = oq_stub.Dequeue(oq_pb2.DequeueRequest(), timeout=5)
                     if response.found:
                         logging.info(
-                            "[Executor %d] Order %s is being executed...",
+                            "[Executor %d] Executing order %s (%d items)...",
+                            self.executor_id, response.orderId, len(response.items),
+                        )
+                        self._execute_order(response.orderId, response.items, None)
+                        logging.info(
+                            "[Executor %d] Order %s completed",
                             self.executor_id, response.orderId,
                         )
                     else:
@@ -230,7 +244,7 @@ class ExecutorNode:
                     )
                 time.sleep(DEQUEUE_INTERVAL)
         finally:
-            channel.close()
+            oq_channel.close()
 
     def run_follower_loop(self):
         """Non-leader: periodically check if leader is alive."""

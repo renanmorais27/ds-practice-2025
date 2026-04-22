@@ -25,6 +25,11 @@ sys.path.insert(0, oq_grpc_path)
 import order_queue_pb2 as oq_pb2
 import order_queue_pb2_grpc as oq_grpc
 
+db_grpc_path = os.path.abspath(os.path.join(FILE, "../../../utils/pb/books_database"))
+sys.path.insert(0, db_grpc_path)
+import books_database_pb2 as db_pb2
+import books_database_pb2_grpc as db_grpc
+
 from flask import Flask, request
 from flask_cors import CORS
 import json
@@ -327,15 +332,65 @@ def checkout():
                 broadcast_clear(order_id, vector_clock)
                 return result
 
-            # Success — enqueue order before responding
+            # Success — atomically reserve stock before enqueueing
             suggested_books = json.loads(books_payload)
+
+            items = request_data.get("items", [])
+            reserved = []  # tracks (title, quantity) for rollback on any later failure
+
+            def release_reserved_stock():
+                try:
+                    with grpc.insecure_channel("books_db_1:50060") as rb_channel:
+                        rb_stub = db_grpc.BooksDatabaseStub(rb_channel)
+                        for r_title, r_qty in reserved:
+                            try:
+                                rb_stub.Increment(
+                                    db_pb2.IncrementRequest(title=r_title, quantity=r_qty), timeout=5
+                                )
+                            except Exception as rb_exc:
+                                logging.error("[%s] Rollback failed for '%s': %s", order_id, r_title, rb_exc)
+                except Exception as e:
+                    logging.error("[%s] Could not open DB channel for rollback: %s", order_id, e)
+
+            try:
+                with grpc.insecure_channel("books_db_1:50060") as db_channel:
+                    db_stub = db_grpc.BooksDatabaseStub(db_channel)
+                    deny_reason = ""
+                    for item in items:
+                        title = item.get("name", "")
+                        quantity = item.get("quantity", 0)
+                        resp = db_stub.TryDecrement(
+                            db_pb2.TryDecrementRequest(title=title, quantity=quantity), timeout=5
+                        )
+                        if not resp.success:
+                            deny_reason = f"Insufficient stock for '{title}' (requested: {quantity})"
+                            break
+                        reserved.append((title, quantity))
+
+                    if deny_reason:
+                        release_reserved_stock()
+                        vector_clock = tick(vector_clock, "orchestrator")
+                        record_event(event_trace, vector_clock, "orchestrator", "stock_check_failed")
+                        result = _deny_response(order_id, deny_reason, vector_clock, event_trace)
+                        broadcast_clear(order_id, vector_clock)
+                        return result
+
+                vector_clock = tick(vector_clock, "orchestrator")
+                record_event(event_trace, vector_clock, "orchestrator", "stock_reserved")
+            except Exception as stock_exc:
+                logging.warning("[%s] Stock reservation failed: %s", order_id, stock_exc)
+                release_reserved_stock()
 
             # Enqueue the approved order and require confirmation before responding.
             try:
+                oq_items = [
+                    oq_pb2.BookItem(title=item.get("name", ""), quantity=item.get("quantity", 0))
+                    for item in items
+                ]
                 with grpc.insecure_channel("order_queue:50054") as oq_channel:
                     oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
                     enqueue_res = oq_stub.Enqueue(
-                        oq_pb2.EnqueueRequest(orderId=order_id), timeout=5
+                        oq_pb2.EnqueueRequest(orderId=order_id, items=oq_items), timeout=5
                     )
                     if not enqueue_res.success:
                         raise RuntimeError("Order queue rejected enqueue")
@@ -347,6 +402,7 @@ def checkout():
                 )
             except Exception as enq_exc:
                 logging.error("[%s] Failed to enqueue order: %s", order_id, enq_exc)
+                release_reserved_stock()
                 vector_clock = tick(vector_clock, "orchestrator")
                 record_event(
                     event_trace, vector_clock, "orchestrator", "order_enqueue_failed",
