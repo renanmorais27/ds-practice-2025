@@ -42,6 +42,9 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
         return db_pb2.WriteResponse(success=True)
 
     def TryDecrement(self, request, context):
+        # Atomic check-and-reserve: the stock check and the decrement happen under the same lock,
+        # so concurrent callers cannot both observe "enough stock" and then both subtract.
+        # Returns success=False (without mutating) if stock is insufficient; caller must retry or abort.
         with self._lock:
             current = self.store.get(request.title, 0)
             if current < request.quantity:
@@ -83,6 +86,11 @@ class PrimaryReplica(BooksDatabaseServicer):
         return db_pb2.WriteResponse(success=True)
 
     def TryDecrement(self, request, context):
+        # Atomic check-and-reserve on the primary, then replicate to backups.
+        # The check and the decrement share one critical section, so the primary is the single
+        # serialization point for stock reservation — two concurrent requests cannot both succeed
+        # when only one's worth of stock exists. Backups receive the same decrement only if the
+        # primary committed, keeping replicas consistent with the reservation decision.
         with self._lock:
             current = self.store.get(request.title, 0)
             if current < request.quantity:
