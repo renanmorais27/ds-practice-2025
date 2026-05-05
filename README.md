@@ -180,6 +180,38 @@ flowchart TD
     E -- No --> C
 ```
 
+## Consistency Protocol (Books DB)
+This section documents the behavior implemented in `books_database/src/app.py` (very short + diagram).
+
+Very short: Primary journals and applies committed writes locally, then performs synchronous RPC replication attempts to configured backups; replication failures are logged and do not cause the Primary to roll back (best‑effort replication).
+
+```mermaid
+sequenceDiagram
+    participant EX as Executor (leader)
+    participant PB as BooksDB Primary
+    participant B1 as Backup 1
+    participant B2 as Backup 2
+
+    EX->>PB: Commit(order_id, deltas)
+
+    PB->>PB: JournalWrite(order_id, deltas)
+    PB->>PB: ApplyWriteLocally(order_id, deltas)
+    PB->>B1: Replicate Write (RPC, timeout=3s)
+    PB->>B2: Replicate Write (RPC, timeout=3s)
+    B1-->>PB: Ack (or failure logged)
+    B2-->>PB: Ack (or failure logged)
+    PB-->>EX: CommitResponse(success=true)
+```
+
+Short facts (implemented):
+- `Prepare` and `Commit` entries are persisted to a journal when `BOOKS_DB_JOURNAL` is set; the journal is replayed on startup.
+- On `Commit` the Primary applies the decrement and persists the journal before replication.
+- Primary replication uses synchronous RPC calls to each backup (3s timeout) but does not enforce quorum or fail the commit on backup failures; failures are logged. The Primary returns success to the caller (`CommitResponse(success=true)`).
+- Backups apply writes idempotently and can replay the journal on restart.
+
+This description reflects current code (no stronger durability guarantees are assumed).
+
+
 ## Distributed Commitment (2PC)
 
 The elected executor leader is the 2PC coordinator. Participants are the dummy **payment** service and the **books database** primary. Stock enforcement and the payment side-effect are intentionally *not* performed on the synchronous checkout path — they happen inside the commit phase of this protocol so that the two side-effects are applied atomically.

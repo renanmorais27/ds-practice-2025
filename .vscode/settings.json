@@ -5,5 +5,7 @@
         "./utils/pb/suggestions",
         "./utils/pb/executor",
         "./utils/pb/order_queue",
+        "./utils/pb/books_database",
+        "./utils/pb/payment",
     ],
 }
