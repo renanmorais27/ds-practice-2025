@@ -2,7 +2,7 @@
 
 Distributed Systems course project @ University of Tartu — an online bookstore checkout system built with a microservices architecture.
 
-The frontend sends checkout requests to an orchestrator, which coordinates transaction verification, fraud detection, and book suggestions via gRPC. Approved orders are enqueued and executed by replicated executor services using bully-algorithm leader election.
+The frontend sends checkout requests to an orchestrator, which coordinates transaction verification, fraud detection, and book suggestions via gRPC. Verified orders are enqueued and then driven through a **two-phase commit (2PC)** protocol by the elected executor leader, which acts as the coordinator across a dummy payment service and the replicated books database — only the `Commit` phase executes the real side-effects (charge + stock decrement).
 
 ## System Model
 
@@ -46,9 +46,13 @@ graph TD
     E -->|gRPC| F
     C -->|gRPC enqueue| G[OrderQueue<br/>Port: 50054]
     H[Executor x3<br/>Port: 50055<br/>Bully Election] -->|gRPC dequeue| G
+    H -->|2PC Prepare/Commit/Abort| I[Payment<br/>Port: 50058]
+    H -->|2PC Prepare/Commit/Abort| J[Books DB primary<br/>Port: 50060]
+    J -.->|replicate Write| K[Books DB backups x2<br/>Ports: 50061/50062]
+    H -->|POST order-outcome| C
 ```
 
-All backend services run in Docker containers. The orchestrator dispatches parallel init RPCs to all three verification services, then triggers the execution flow via `StartVerificationFlow` on transaction verification. Backend services communicate directly over gRPC: TV calls FD for fraud checks, FD calls Suggestions for book recommendations. After the terminal result, approved orders are enqueued into OrderQueue, and the orchestrator broadcasts `ClearOrder` to all services. Three Executor replicas elect a leader via the bully algorithm; the leader dequeues and executes orders.
+All backend services run in Docker containers. The orchestrator dispatches parallel init RPCs to all three verification services, then triggers the execution flow via `StartVerificationFlow` on transaction verification. Backend services communicate directly over gRPC: TV calls FD for fraud checks, FD calls Suggestions for book recommendations. Once verification completes, the orchestrator enqueues the order into OrderQueue, responds `accepted` to the frontend, and broadcasts `ClearOrder`. The elected executor leader then dequeues the order and drives a 2PC across the payment service and the books database primary — only a successful Commit charges the customer and decrements stock. The executor posts the final outcome back to the orchestrator; the frontend polls `/order-status/<orderId>` until it flips to `committed` or `aborted`.
 
 ## Services
 
@@ -60,7 +64,9 @@ All backend services run in Docker containers. The orchestrator dispatches paral
 | **Fraud Detection** | 50051 | gRPC | Deterministic fraud analysis on user data and card data |
 | **Suggestions** | 50053 | gRPC | AI-generated book recommendations (Google Gemma 3 27B) with deterministic fallback |
 | **Order Queue** | 50054 | gRPC | Thread-safe FIFO queue for approved orders |
-| **Executor** (x3) | 50055 | gRPC | Replicated order executor with bully-algorithm leader election |
+| **Executor** (x3) | 50055 | gRPC | Replicated order executor with bully-algorithm leader election; leader is the 2PC coordinator |
+| **Payment** | 50058 | gRPC | Dummy payment service — 2PC participant; real charge only on Commit |
+| **Books Database** (x3) | 50060 | gRPC | Replicated stock store (primary + 2 backups); 2PC participant — stock decrement only on Commit |
 
 ## Checkout Flow
 
@@ -83,7 +89,7 @@ The checkout uses a two-stage protocol with vector clocks tracking causal order 
 
 Any failure short-circuits downstream events. Suggestions failure is non-fatal (order approved with empty book list). After the terminal result, the orchestrator broadcasts `ClearOrder` with the final vector clock `VCf` — services clear cached data only if their local clock `<= VCf`.
 
-**Stage 3 — Order Execution:** Approved orders are enqueued into the OrderQueue. The orchestrator waits for enqueue confirmation before returning approval to the frontend. Three Executor replicas use the bully algorithm to elect a leader — the leader has exclusive access to dequeue orders and logs their execution. Non-leaders monitor the leader's health and re-trigger election if it becomes unreachable.
+**Stage 3 — Distributed Commit (2PC):** Verified orders are enqueued into the OrderQueue and `/checkout` returns `{orderId, status: "accepted"}` — verification passed, but the order has not yet been committed. Three Executor replicas use the bully algorithm to elect a leader; the leader dequeues the order and acts as the 2PC coordinator across two participants: the payment service and the books database primary. Phase 1 (Prepare) collects votes; any NO or RPC failure becomes an Abort. Phase 2 (Commit or Abort) broadcasts the decision with bounded retry. Only a successful Commit triggers the real side-effects — the payment service logs `EXECUTED payment…`, and the books database applies the staged stock decrement and replicates it to the backups. After the decision, the executor posts the outcome to the orchestrator's `/internal/order-outcome` endpoint. The frontend polls `/order-status/<orderId>` every ~1.5 s until it sees `committed` or `aborted` (with a ~30 s timeout fallback).
 
 ## System Diagram
 
@@ -129,13 +135,12 @@ sequenceDiagram
     FD-->>TV: result + books
     TV-->>O: result + books
 
-    opt Order approved
+    opt Verification passed
         O->>OQ: Enqueue(orderId)
         OQ-->>O: success
     end
 
-    O-->>F: response + vectorClock + eventTrace
-    F-->>U: Order Approved / Denied
+    O-->>F: {orderId, status: "accepted"} + vectorClock + eventTrace
 
     par Cleanup broadcast
         O->>TV: ClearVerificationOrder (VCf)
@@ -145,8 +150,16 @@ sequenceDiagram
 
     Note over EX: Bully election (highest ID wins)
     EX->>OQ: Dequeue (leader only)
-    OQ-->>EX: orderId
-    Note over EX: Order executed
+    OQ-->>EX: orderId, items
+
+    Note over EX: 2PC coordinator drives Prepare/Commit/Abort<br/>across payment + books DB primary
+    EX->>O: POST /internal/order-outcome (committed | aborted)
+
+    loop until non-pending
+        F->>O: GET /order-status/<orderId>
+        O-->>F: {state: pending | committed | aborted}
+    end
+    F-->>U: Order Approved / Denied
 ```
 
 ## Leader Election (Bully Algorithm)
@@ -166,6 +179,79 @@ flowchart TD
     E -- Yes --> F[Wait for Victory announcement]
     E -- No --> C
 ```
+
+## Consistency Protocol (Books DB)
+This section documents the behavior implemented in `books_database/src/app.py` (very short + diagram).
+
+Very short: Primary journals and applies committed writes locally, then performs synchronous RPC replication attempts to configured backups; replication failures are logged and do not cause the Primary to roll back (best‑effort replication).
+
+```mermaid
+sequenceDiagram
+    participant EX as Executor (leader)
+    participant PB as BooksDB Primary
+    participant B1 as Backup 1
+    participant B2 as Backup 2
+
+    EX->>PB: Commit(order_id, deltas)
+
+    PB->>PB: JournalWrite(order_id, deltas)
+    PB->>PB: ApplyWriteLocally(order_id, deltas)
+    PB->>B1: Replicate Write (RPC, timeout=3s)
+    PB->>B2: Replicate Write (RPC, timeout=3s)
+    B1-->>PB: Ack (or failure logged)
+    B2-->>PB: Ack (or failure logged)
+    PB-->>EX: CommitResponse(success=true)
+```
+
+Short facts (implemented):
+- `Prepare` and `Commit` entries are persisted to a journal when `BOOKS_DB_JOURNAL` is set; the journal is replayed on startup.
+- On `Commit` the Primary applies the decrement and persists the journal before replication.
+- Primary replication uses synchronous RPC calls to each backup (3s timeout) but does not enforce quorum or fail the commit on backup failures; failures are logged. The Primary returns success to the caller (`CommitResponse(success=true)`).
+- Backups apply writes idempotently and can replay the journal on restart.
+
+This description reflects current code (no stronger durability guarantees are assumed).
+
+
+## Distributed Commitment (2PC)
+
+The elected executor leader is the 2PC coordinator. Participants are the dummy **payment** service and the **books database** primary. Stock enforcement and the payment side-effect are intentionally *not* performed on the synchronous checkout path — they happen inside the commit phase of this protocol so that the two side-effects are applied atomically.
+
+```mermaid
+sequenceDiagram
+    participant EX as Executor (coordinator)
+    participant P as Payment
+    participant B as Books DB (primary)
+
+    EX->>P: Prepare(order_id, amount)
+    EX->>B: Prepare(order_id, items)
+    P-->>EX: ready=true
+    B-->>EX: ready=true
+
+    Note over EX: all voted YES → COMMIT
+
+    EX->>P: Commit(order_id)
+    EX->>B: Commit(order_id)
+    P-->>EX: success
+    B-->>EX: success
+    Note over B: applies decrement, replicates Write to backups
+
+    EX->>EX: POST /internal/order-outcome (committed)
+```
+
+A `NO` vote (e.g. insufficient stock) or any RPC exception on Prepare short-circuits to Abort; both participants then drop their staged state and no side-effect is applied. `Commit` and `Abort` are broadcast with bounded retry (3× with short backoff) to ride out transient network blips — participants' idempotent handling (three-state `_tx` map keyed by `order_id`) keeps repeated messages safe.
+
+**Message count and trade-offs (for the report):**
+
+| Dimension              | 2PC (chosen)                       | 3PC                                 |
+|------------------------|------------------------------------|-------------------------------------|
+| Phases                 | 2                                  | 3                                   |
+| Messages per tx (N=2)  | 8                                  | 12                                  |
+| Blocking on coord fail | Yes, between Prepare and decision  | No (with synchrony + no partitions) |
+| Complexity             | Low                                | Medium                              |
+
+**Participant recovery (bonus):** the books database optionally journals its `_tx` map to `$BOOKS_DB_JOURNAL` (default `/tmp/books_db_journal.json` in compose) before returning a `Prepare` vote, so after a crash a re-sent `Commit` applies the decrement exactly once.
+
+**Coordinator failure:** 2PC blocks in the window between votes being collected and the decision being broadcast — a surviving participant cannot safely decide unilaterally. A full write-up of the failure windows, why they're inherent to 2PC, and the proposed mitigation (replicated decision log on the bully-elected standby executor, plus a termination protocol) lives in [docs/analysis/coordinator-failure.md](docs/analysis/coordinator-failure.md).
 
 ## Validation Rules
 
@@ -225,14 +311,16 @@ Code changes are hot-reloaded automatically — no restart needed during develop
 
 ```
 frontend/                     Static HTML/JS checkout page (served by Nginx)
-orchestrator/                 Flask REST API — coordinates the checkout pipeline
+orchestrator/                 Flask REST API — coordinates the checkout pipeline, exposes /order-status
 transaction_verification/     gRPC service — field validation (events a, b, c)
 fraud_detection/              gRPC service — fraud checks (events d, e)
 suggestions/                  gRPC service — AI book recommendations (event f)
-order_queue/                  gRPC service — thread-safe FIFO queue for approved orders
-executor/                     gRPC service — replicated order executor with leader election
+order_queue/                  gRPC service — thread-safe FIFO queue for verified orders
+executor/                     gRPC service — replicated; leader drives 2PC as coordinator
+payment/                      gRPC service — dummy payment; 2PC participant
+books_database/               gRPC service — replicated stock store; 2PC participant
 utils/                        Shared protobuf definitions and vector clock helpers
-docs/                         Documentation and project plans
+docs/                         Documentation, project plans, and analysis notes
 ```
 
 ## Known Limitations
@@ -241,3 +329,6 @@ docs/                         Documentation and project plans
 - Only 5-digit ZIP codes are supported for billing address
 - Order amount is based on item quantity sum, not actual prices
 - AI suggestions may not always parse correctly (falls back to static list)
+- **2PC coordinator blocking window** — if the executor leader crashes between collecting votes and broadcasting the decision, the participants that voted YES remain staged until a coordinator returns. The prototype does not implement coordinator-side decision replication; see [docs/analysis/coordinator-failure.md](docs/analysis/coordinator-failure.md) for the mitigation design.
+- **Books DB commit replication** is best-effort per-title via absolute `Write(title, new_stock)` values, outside the primary's lock. A multi-title commit that crashes mid-replication can leave divergent backups with no automatic reconciliation — acceptable because only one executor leader drives 2PC at a time.
+- **Order status map** is in-memory and single-instance. Orchestrator restart loses outcome records for orders submitted before the restart; frontend polling will time out with the "still processing" fallback.

@@ -25,16 +25,12 @@ sys.path.insert(0, oq_grpc_path)
 import order_queue_pb2 as oq_pb2
 import order_queue_pb2_grpc as oq_grpc
 
-db_grpc_path = os.path.abspath(os.path.join(FILE, "../../../utils/pb/books_database"))
-sys.path.insert(0, db_grpc_path)
-import books_database_pb2 as db_pb2
-import books_database_pb2_grpc as db_grpc
-
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
 import grpc
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
 
@@ -214,10 +210,51 @@ def broadcast_clear(order_id, final_clock):
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+# In-memory status map populated by /checkout (pending) and updated by the executor's
+# /internal/order-outcome callback after 2PC completes. Frontend polls /order-status/<id>.
+# This is intentionally single-instance and non-persistent — the prototype has one orchestrator.
+order_statuses = {}
+_status_lock = threading.Lock()
+
+
+def _set_status(order_id, state, reason="", extra=None):
+    with _status_lock:
+        entry = order_statuses.get(order_id, {})
+        entry.update({"state": state, "reason": reason})
+        if extra:
+            entry.update(extra)
+        order_statuses[order_id] = entry
+
 
 @app.route("/", methods=["GET"])
 def index():
     return "Hello, orchestrator!"
+
+
+@app.route("/order-status/<order_id>", methods=["GET"])
+def order_status(order_id):
+    with _status_lock:
+        entry = order_statuses.get(order_id)
+    if entry is None:
+        return jsonify({"state": "unknown"}), 404
+    return jsonify(entry)
+
+
+@app.route("/internal/order-outcome", methods=["POST"])
+def order_outcome():
+    """Executor callback after 2PC completes — updates the status map."""
+    try:
+        body = json.loads(request.data)
+    except Exception:
+        return jsonify({"error": "invalid json"}), 400
+    order_id = body.get("orderId")
+    outcome = body.get("outcome")  # "committed" | "aborted"
+    reason = body.get("reason", "")
+    if not order_id or outcome not in ("committed", "aborted"):
+        return jsonify({"error": "missing orderId or bad outcome"}), 400
+    _set_status(order_id, outcome, reason)
+    logging.info("[%s] 2PC outcome recorded: %s (%s)", order_id, outcome, reason)
+    return jsonify({"ok": True})
 
 
 @app.route("/checkout", methods=["POST"])
@@ -332,56 +369,14 @@ def checkout():
                 broadcast_clear(order_id, vector_clock)
                 return result
 
-            # Success — atomically reserve stock before enqueueing
+            # Verification passed — hand the order off to the executor for 2PC.
+            # Stock enforcement and the dummy payment now happen inside the executor-driven
+            # commitment protocol, so the orchestrator no longer mutates stock on this path.
+            # The HTTP response returns "accepted" immediately; the frontend polls
+            # /order-status/<order_id> until the executor posts a committed/aborted outcome.
             suggested_books = json.loads(books_payload)
-
             items = request_data.get("items", [])
-            reserved = []  # tracks (title, quantity) for rollback on any later failure
 
-            def release_reserved_stock():
-                try:
-                    with grpc.insecure_channel("books_db_1:50060") as rb_channel:
-                        rb_stub = db_grpc.BooksDatabaseStub(rb_channel)
-                        for r_title, r_qty in reserved:
-                            try:
-                                rb_stub.Increment(
-                                    db_pb2.IncrementRequest(title=r_title, quantity=r_qty), timeout=5
-                                )
-                            except Exception as rb_exc:
-                                logging.error("[%s] Rollback failed for '%s': %s", order_id, r_title, rb_exc)
-                except Exception as e:
-                    logging.error("[%s] Could not open DB channel for rollback: %s", order_id, e)
-
-            try:
-                with grpc.insecure_channel("books_db_1:50060") as db_channel:
-                    db_stub = db_grpc.BooksDatabaseStub(db_channel)
-                    deny_reason = ""
-                    for item in items:
-                        title = item.get("name", "")
-                        quantity = item.get("quantity", 0)
-                        resp = db_stub.TryDecrement(
-                            db_pb2.TryDecrementRequest(title=title, quantity=quantity), timeout=5
-                        )
-                        if not resp.success:
-                            deny_reason = f"Insufficient stock for '{title}' (requested: {quantity})"
-                            break
-                        reserved.append((title, quantity))
-
-                    if deny_reason:
-                        release_reserved_stock()
-                        vector_clock = tick(vector_clock, "orchestrator")
-                        record_event(event_trace, vector_clock, "orchestrator", "stock_check_failed")
-                        result = _deny_response(order_id, deny_reason, vector_clock, event_trace)
-                        broadcast_clear(order_id, vector_clock)
-                        return result
-
-                vector_clock = tick(vector_clock, "orchestrator")
-                record_event(event_trace, vector_clock, "orchestrator", "stock_reserved")
-            except Exception as stock_exc:
-                logging.warning("[%s] Stock reservation failed: %s", order_id, stock_exc)
-                release_reserved_stock()
-
-            # Enqueue the approved order and require confirmation before responding.
             try:
                 oq_items = [
                     oq_pb2.BookItem(title=item.get("name", ""), quantity=item.get("quantity", 0))
@@ -395,14 +390,19 @@ def checkout():
                     if not enqueue_res.success:
                         raise RuntimeError("Order queue rejected enqueue")
 
-                logging.info("[%s] Order enqueued successfully", order_id)
+                # Seed the status entry AFTER a successful enqueue so the frontend only
+                # polls for orders the executor will actually see.
+                _set_status(
+                    order_id, "pending", "",
+                    extra={"suggestedBooks": suggested_books},
+                )
+                logging.info("[%s] Order enqueued, awaiting 2PC outcome", order_id)
                 vector_clock = tick(vector_clock, "orchestrator")
                 record_event(
                     event_trace, vector_clock, "orchestrator", "order_enqueued",
                 )
             except Exception as enq_exc:
                 logging.error("[%s] Failed to enqueue order: %s", order_id, enq_exc)
-                release_reserved_stock()
                 vector_clock = tick(vector_clock, "orchestrator")
                 record_event(
                     event_trace, vector_clock, "orchestrator", "order_enqueue_failed",
@@ -422,8 +422,8 @@ def checkout():
 
             result = {
                 "orderId": order_id,
-                "status": "Order Approved",
-                "reason": "Transaction valid",
+                "status": "accepted",
+                "reason": "Transaction valid; awaiting distributed commit",
                 "suggestedBooks": suggested_books,
                 "vectorClock": vector_clock,
                 "eventTrace": event_trace,

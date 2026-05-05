@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import suggestions_pb2 as suggestions__pb2
+import payment_pb2 as payment__pb2
 
 GRPC_GENERATED_VERSION = '1.73.1'
 GRPC_VERSION = grpc.__version__
@@ -18,14 +18,14 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in suggestions_pb2_grpc.py depends on'
+        + f' but the generated code in payment_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class SuggestionsServiceStub(object):
+class PaymentServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -34,75 +34,75 @@ class SuggestionsServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.InitializeSuggestionsOrder = channel.unary_unary(
-                '/suggestions.SuggestionsService/InitializeSuggestionsOrder',
-                request_serializer=suggestions__pb2.SuggestionsRequest.SerializeToString,
-                response_deserializer=suggestions__pb2.SuggestionsResponse.FromString,
+        self.Prepare = channel.unary_unary(
+                '/payment.PaymentService/Prepare',
+                request_serializer=payment__pb2.PreparePaymentRequest.SerializeToString,
+                response_deserializer=payment__pb2.PrepareResponse.FromString,
                 _registered_method=True)
-        self.GenerateSuggestions = channel.unary_unary(
-                '/suggestions.SuggestionsService/GenerateSuggestions',
-                request_serializer=suggestions__pb2.Empty.SerializeToString,
-                response_deserializer=suggestions__pb2.SuggestionsResponse.FromString,
+        self.Commit = channel.unary_unary(
+                '/payment.PaymentService/Commit',
+                request_serializer=payment__pb2.CommitRequest.SerializeToString,
+                response_deserializer=payment__pb2.CommitResponse.FromString,
                 _registered_method=True)
-        self.ClearSuggestionsOrder = channel.unary_unary(
-                '/suggestions.SuggestionsService/ClearSuggestionsOrder',
-                request_serializer=suggestions__pb2.Empty.SerializeToString,
-                response_deserializer=suggestions__pb2.SuggestionsResponse.FromString,
+        self.Abort = channel.unary_unary(
+                '/payment.PaymentService/Abort',
+                request_serializer=payment__pb2.AbortRequest.SerializeToString,
+                response_deserializer=payment__pb2.AbortResponse.FromString,
                 _registered_method=True)
 
 
-class SuggestionsServiceServicer(object):
+class PaymentServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def InitializeSuggestionsOrder(self, request, context):
+    def Prepare(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GenerateSuggestions(self, request, context):
+    def Commit(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def ClearSuggestionsOrder(self, request, context):
+    def Abort(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
 
-def add_SuggestionsServiceServicer_to_server(servicer, server):
+def add_PaymentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'InitializeSuggestionsOrder': grpc.unary_unary_rpc_method_handler(
-                    servicer.InitializeSuggestionsOrder,
-                    request_deserializer=suggestions__pb2.SuggestionsRequest.FromString,
-                    response_serializer=suggestions__pb2.SuggestionsResponse.SerializeToString,
+            'Prepare': grpc.unary_unary_rpc_method_handler(
+                    servicer.Prepare,
+                    request_deserializer=payment__pb2.PreparePaymentRequest.FromString,
+                    response_serializer=payment__pb2.PrepareResponse.SerializeToString,
             ),
-            'GenerateSuggestions': grpc.unary_unary_rpc_method_handler(
-                    servicer.GenerateSuggestions,
-                    request_deserializer=suggestions__pb2.Empty.FromString,
-                    response_serializer=suggestions__pb2.SuggestionsResponse.SerializeToString,
+            'Commit': grpc.unary_unary_rpc_method_handler(
+                    servicer.Commit,
+                    request_deserializer=payment__pb2.CommitRequest.FromString,
+                    response_serializer=payment__pb2.CommitResponse.SerializeToString,
             ),
-            'ClearSuggestionsOrder': grpc.unary_unary_rpc_method_handler(
-                    servicer.ClearSuggestionsOrder,
-                    request_deserializer=suggestions__pb2.Empty.FromString,
-                    response_serializer=suggestions__pb2.SuggestionsResponse.SerializeToString,
+            'Abort': grpc.unary_unary_rpc_method_handler(
+                    servicer.Abort,
+                    request_deserializer=payment__pb2.AbortRequest.FromString,
+                    response_serializer=payment__pb2.AbortResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'suggestions.SuggestionsService', rpc_method_handlers)
+            'payment.PaymentService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('suggestions.SuggestionsService', rpc_method_handlers)
+    server.add_registered_method_handlers('payment.PaymentService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class SuggestionsService(object):
+class PaymentService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def InitializeSuggestionsOrder(request,
+    def Prepare(request,
             target,
             options=(),
             channel_credentials=None,
@@ -115,9 +115,9 @@ class SuggestionsService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/suggestions.SuggestionsService/InitializeSuggestionsOrder',
-            suggestions__pb2.SuggestionsRequest.SerializeToString,
-            suggestions__pb2.SuggestionsResponse.FromString,
+            '/payment.PaymentService/Prepare',
+            payment__pb2.PreparePaymentRequest.SerializeToString,
+            payment__pb2.PrepareResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -129,7 +129,7 @@ class SuggestionsService(object):
             _registered_method=True)
 
     @staticmethod
-    def GenerateSuggestions(request,
+    def Commit(request,
             target,
             options=(),
             channel_credentials=None,
@@ -142,9 +142,9 @@ class SuggestionsService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/suggestions.SuggestionsService/GenerateSuggestions',
-            suggestions__pb2.Empty.SerializeToString,
-            suggestions__pb2.SuggestionsResponse.FromString,
+            '/payment.PaymentService/Commit',
+            payment__pb2.CommitRequest.SerializeToString,
+            payment__pb2.CommitResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -156,7 +156,7 @@ class SuggestionsService(object):
             _registered_method=True)
 
     @staticmethod
-    def ClearSuggestionsOrder(request,
+    def Abort(request,
             target,
             options=(),
             channel_credentials=None,
@@ -169,9 +169,9 @@ class SuggestionsService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/suggestions.SuggestionsService/ClearSuggestionsOrder',
-            suggestions__pb2.Empty.SerializeToString,
-            suggestions__pb2.SuggestionsResponse.FromString,
+            '/payment.PaymentService/Abort',
+            payment__pb2.AbortRequest.SerializeToString,
+            payment__pb2.AbortResponse.FromString,
             options,
             channel_credentials,
             insecure,

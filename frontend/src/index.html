@@ -124,6 +124,32 @@
                 termsAccepted: formData.get('terms') === 'on',
             };
 
+            const responseDiv = document.getElementById('response');
+            const renderApproved = (orderId, suggestedBooks) => {
+                const books = (suggestedBooks || []).map(b => `<li>${b.title} by ${b.author}</li>`).join('');
+                responseDiv.className = 'mt-6 p-4 border rounded-lg bg-green-100 text-green-700';
+                responseDiv.innerHTML = `<strong>Order status: Order Approved</strong><br>Order ID: ${orderId}<br>Suggested Books:<ul class="list-disc pl-5 mt-2 space-y-1">${books}</ul>`;
+                responseDiv.style.display = 'block';
+                window.scrollTo(0, document.body.scrollHeight);
+            };
+            const renderDenied = (orderId, reason, isFraud) => {
+                const cls = isFraud ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-800';
+                responseDiv.className = `mt-6 p-4 border rounded-lg ${cls}`;
+                responseDiv.innerHTML = `<strong>Order status: Order Denied</strong><br>Order ID: ${orderId}<br><span class="font-semibold">Reason: ${reason}</span>`;
+                responseDiv.style.display = 'block';
+                window.scrollTo(0, document.body.scrollHeight);
+            };
+            const renderPending = (orderId) => {
+                responseDiv.className = 'mt-6 p-4 border rounded-lg bg-blue-50 text-blue-700';
+                responseDiv.innerHTML = `<strong>Processing order…</strong><br>Order ID: ${orderId}<br>The executor is running the distributed commit protocol. This page will update automatically.`;
+                responseDiv.style.display = 'block';
+            };
+            const renderTimeout = (orderId) => {
+                responseDiv.className = 'mt-6 p-4 border rounded-lg bg-yellow-100 text-yellow-800';
+                responseDiv.innerHTML = `<strong>Still processing</strong><br>Order ID: ${orderId}<br>The 2PC result has not arrived yet — check back later.`;
+                responseDiv.style.display = 'block';
+            };
+
             try {
                 const response = await fetch('http://localhost:8081/checkout', {
                     method: 'POST',
@@ -131,34 +157,51 @@
                 });
 
                 const result = await response.json();
-                const responseDiv = document.getElementById('response');
 
-                if (response.ok) {
-                    const suggestedBooks = result.suggestedBooks.map(book => `<li>${book.title} by ${book.author}</li>`).join('');
-                    let statusHtml = `<strong>Order status: ${result.status}</strong><br>Order ID: ${result.orderId}<br>`;
-
-                    if (result.status === 'Order Approved') {
-                        statusHtml += `Suggested Books:<ul class="list-disc pl-5 mt-2 space-y-1">${suggestedBooks}</ul>`;
-                        responseDiv.className = 'mt-6 p-4 border rounded-lg bg-green-100 text-green-700';
-                    } else if (result.reason === 'Fraud detected') {
-                        statusHtml += `<br><span class="font-semibold">Reason: ${result.reason}</span>`;
-                        responseDiv.className = 'mt-6 p-4 border rounded-lg bg-red-100 text-red-700';
-                    } else {
-                        statusHtml += `<br><span class="font-semibold">Reason: ${result.reason}</span>`;
-                        responseDiv.className = 'mt-6 p-4 border rounded-lg bg-yellow-100 text-yellow-800';
-                    }
-
-                    responseDiv.innerHTML = statusHtml;
-                } else {
-                    responseDiv.textContent = `Error: ${result.error.message}`;
+                if (!response.ok) {
+                    responseDiv.textContent = `Error: ${result.error && result.error.message ? result.error.message : 'request failed'}`;
                     responseDiv.className = "mt-6 p-4 border rounded-lg bg-red-100 text-red-700";
+                    responseDiv.style.display = 'block';
+                    return;
                 }
 
-                responseDiv.style.display = 'block';
-                // scroll to the bottom of the page
-                window.scrollTo(0, document.body.scrollHeight);
+                // Verification phase failed (fraud / validation): orchestrator returns synchronously.
+                if (result.status === 'Order Denied') {
+                    renderDenied(result.orderId, result.reason, result.reason === 'Fraud detected');
+                    return;
+                }
+
+                // Verification passed, 2PC is running. Poll /order-status/<id> until committed/aborted.
+                renderPending(result.orderId);
+
+                const pollIntervalMs = 1500;
+                const maxAttempts = Math.ceil(30000 / pollIntervalMs); // ~30 s budget
+                let attempts = 0;
+                const poll = async () => {
+                    attempts += 1;
+                    try {
+                        const sRes = await fetch(`http://localhost:8081/order-status/${result.orderId}`);
+                        if (sRes.ok) {
+                            const s = await sRes.json();
+                            if (s.state === 'committed') {
+                                renderApproved(result.orderId, s.suggestedBooks || result.suggestedBooks);
+                                return;
+                            }
+                            if (s.state === 'aborted') {
+                                renderDenied(result.orderId, s.reason || 'Order aborted', false);
+                                return;
+                            }
+                        }
+                    } catch (_) { /* transient — keep polling */ }
+
+                    if (attempts >= maxAttempts) {
+                        renderTimeout(result.orderId);
+                        return;
+                    }
+                    setTimeout(poll, pollIntervalMs);
+                };
+                setTimeout(poll, pollIntervalMs);
             } catch (error) {
-                const responseDiv = document.getElementById('response');
                 responseDiv.textContent = `Unexpected error occurred: ${error.message}`;
                 responseDiv.className = "mt-6 p-4 border rounded-lg bg-red-100 text-red-700";
                 responseDiv.style.display = 'block';
