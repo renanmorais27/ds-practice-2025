@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Atomic Checkout in a Distributed Bookstore - A0 Portrait Poster Concept</title>
+  <style>
+    @page {
+      size: A0 portrait;
+      margin: 0;
+    }
+
+    :root {
+      --paper: #f7f8f3;
+      --ink: #14213d;
+      --muted: #53616f;
+      --line: #cfd8d5;
+      --teal: #007a7a;
+      --teal-soft: #dcefed;
+      --coral: #d84a3a;
+      --coral-soft: #f7ded9;
+      --gold: #d69e2e;
+      --gold-soft: #fbf0cf;
+      --white: #ffffff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background: #d9dfdc;
+      color: var(--ink);
+      font-family: "Avenir Next", "Gill Sans", "Segoe UI", sans-serif;
+    }
+
+    body {
+      padding: 18px;
+    }
+
+    .poster {
+      width: 841mm;
+      height: 1189mm;
+      margin: 0 auto;
+      padding: 30mm 32mm;
+      background:
+        linear-gradient(90deg, rgba(20, 33, 61, 0.06) 0 1px, transparent 1px 100%),
+        linear-gradient(0deg, rgba(0, 122, 122, 0.07) 0 1px, transparent 1px 100%),
+        var(--paper);
+      background-size: 22mm 22mm;
+      border: 1px solid #b8c1bd;
+      display: grid;
+      grid-template-rows: 210mm 1fr 275mm;
+      gap: 22mm;
+      overflow: hidden;
+    }
+
+    .z-top {
+      display: grid;
+      grid-template-columns: 1.36fr 0.84fr;
+      gap: 24mm;
+      align-items: stretch;
+      position: relative;
+    }
+
+    .z-top::after,
+    .z-middle::after {
+      content: "";
+      position: absolute;
+      height: 3px;
+      background: var(--ink);
+      opacity: 0.9;
+    }
+
+    .z-top::after {
+      left: 10mm;
+      right: 10mm;
+      bottom: -12mm;
+    }
+
+    .z-middle {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18mm;
+    }
+
+    .z-middle::after {
+      left: 9mm;
+      right: 9mm;
+      bottom: -12mm;
+    }
+
+    .z-bottom {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22mm;
+      align-items: stretch;
+    }
+
+    .hero,
+    .panel {
+      background: rgba(255, 255, 255, 0.82);
+      border: 2px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .hero {
+      padding: 22mm 24mm;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .kicker {
+      margin: 0 0 12mm;
+      color: var(--teal);
+      font-size: 18pt;
+      font-weight: 850;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino", Georgia, serif;
+      font-size: 78pt;
+      line-height: 0.96;
+      letter-spacing: 0;
+      max-width: 510mm;
+    }
+
+    .subtitle {
+      margin: 14mm 0 0;
+      color: var(--muted);
+      font-size: 25pt;
+      line-height: 1.25;
+      max-width: 500mm;
+      font-weight: 520;
+    }
+
+    .question {
+      margin: 18mm 0 0;
+      padding: 9mm 10mm;
+      border-left: 6px solid var(--coral);
+      background: var(--coral-soft);
+      font-size: 22pt;
+      line-height: 1.28;
+      font-weight: 750;
+    }
+
+    .meta {
+      padding: 18mm;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 11mm;
+    }
+
+    .step {
+      display: inline-flex;
+      align-items: center;
+      gap: 5mm;
+      color: var(--teal);
+      font-size: 14pt;
+      font-weight: 900;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .step::before {
+      content: attr(data-step);
+      width: 16mm;
+      height: 16mm;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: var(--gold);
+      color: var(--ink);
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 8mm;
+      color: var(--ink);
+      font-size: 30pt;
+      line-height: 1.05;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h3 {
+      margin: 0 0 5mm;
+      color: var(--ink);
+      font-size: 22pt;
+      line-height: 1.08;
+    }
+
+    p,
+    li {
+      color: var(--muted);
+      font-size: 18.5pt;
+      line-height: 1.34;
+    }
+
+    p {
+      margin: 0 0 7mm;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 8mm;
+    }
+
+    li {
+      margin-bottom: 5mm;
+    }
+
+    strong {
+      color: var(--ink);
+      font-weight: 850;
+    }
+
+    .authors {
+      border-left: 5px solid var(--gold);
+      padding-left: 9mm;
+    }
+
+    .authors p {
+      margin-bottom: 3mm;
+      color: var(--ink);
+      font-size: 21pt;
+      line-height: 1.22;
+      font-weight: 800;
+    }
+
+    .authors .affiliation {
+      color: var(--muted);
+      font-size: 16pt;
+      font-weight: 600;
+    }
+
+    .system-model {
+      padding: 9mm;
+      background: var(--teal-soft);
+      border: 2px solid rgba(0, 122, 122, 0.28);
+      border-radius: 8px;
+    }
+
+    .system-model p {
+      margin-bottom: 5mm;
+      color: var(--ink);
+      font-size: 17pt;
+      font-weight: 650;
+    }
+
+    .qr {
+      width: 58mm;
+      height: 58mm;
+      border: 3px solid var(--ink);
+      display: grid;
+      place-items: center;
+      background: var(--white);
+      color: var(--ink);
+      text-align: center;
+      font-size: 10pt;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .description-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18mm;
+      min-height: 0;
+    }
+
+    .description-card {
+      background: var(--white);
+      border: 2.5px solid var(--ink);
+      border-radius: 8px;
+      padding: 15mm;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .description-card::before {
+      content: "TEXT CONTAINER";
+      position: absolute;
+      top: 0;
+      right: 0;
+      padding: 3mm 6mm;
+      background: var(--ink);
+      color: var(--white);
+      font-size: 10pt;
+      font-weight: 900;
+      letter-spacing: 0;
+    }
+
+    .description-card.primary {
+      min-height: 255mm;
+      border-color: var(--teal);
+    }
+
+    .description-card.primary::before {
+      background: var(--teal);
+    }
+
+    .commit-note {
+      margin-top: 14mm;
+      padding: 10mm;
+      background: var(--coral-soft);
+      border-left: 6px solid var(--coral);
+      border-radius: 0 8px 8px 0;
+    }
+
+    .flow-text {
+      margin-top: 8mm;
+      padding: 10mm;
+      background: #f3f6f4;
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      color: var(--ink);
+      font-family: "Menlo", "Consolas", monospace;
+      font-size: 17pt;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    .container-note {
+      margin-top: 8mm;
+      padding: 8mm;
+      background: var(--gold-soft);
+      border-left: 5px solid var(--gold);
+      color: var(--ink);
+      font-size: 17.5pt;
+      line-height: 1.32;
+      font-weight: 650;
+    }
+
+    .insight-list {
+      display: grid;
+      gap: 8mm;
+    }
+
+    .insight {
+      display: grid;
+      grid-template-columns: 19mm 1fr;
+      gap: 8mm;
+      align-items: start;
+      padding-bottom: 7mm;
+      border-bottom: 2px solid var(--line);
+    }
+
+    .insight:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .num {
+      width: 18mm;
+      height: 18mm;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: var(--gold);
+      color: var(--ink);
+      font-size: 14pt;
+      font-weight: 900;
+    }
+
+    .insight p {
+      margin: 0;
+      font-size: 17.5pt;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: 34mm 1fr;
+      gap: 6mm 9mm;
+      margin-top: 8mm;
+      padding-top: 8mm;
+      border-top: 2px solid var(--line);
+    }
+
+    .date {
+      color: var(--teal);
+      font-size: 14pt;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .event {
+      color: var(--muted);
+      font-size: 15.8pt;
+      line-height: 1.26;
+    }
+
+    .print-note {
+      margin-top: 8mm;
+      padding: 7mm;
+      border: 2px dashed var(--line);
+      color: var(--muted);
+      font-size: 15.5pt;
+      line-height: 1.3;
+    }
+
+    @media print {
+      body {
+        padding: 0;
+        background: var(--paper);
+      }
+
+      .poster {
+        margin: 0;
+        border: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="poster">
+    <section class="z-top">
+      <header class="hero">
+        <div>
+          <p class="kicker">Distributed Systems Coursework Poster</p>
+          <h1>Atomic Checkout in a Distributed Bookstore</h1>
+          <p class="subtitle">A microservice checkout that tracks causal order with vector clocks and commits payment plus stock updates with two-phase commit.</p>
+        </div>
+        <div class="question">What has to happen after a shopper clicks "Submit order" so independent services agree on the final result?</div>
+      </header>
+
+      <aside class="panel meta">
+        <div>
+          <span class="step" data-step="1">System model</span>
+          <h2>At A Glance</h2>
+        </div>
+        <div class="authors">
+          <p>Andrius Matšenas</p>
+          <p>Renan Morais</p>
+          <p>Leopold Pichonneau</p>
+          <p class="affiliation">University of Tartu<br>Distributed Systems</p>
+        </div>
+        <div class="system-model">
+          <p>HTTP at the edge; gRPC between backend services.</p>
+          <p>Dockerized services own local state and can fail independently.</p>
+          <p>Vector clocks travel in metadata to explain causal order.</p>
+        </div>
+        <div class="qr">Repo<br>and<br>demo</div>
+      </aside>
+    </section>
+
+    <section class="z-middle">
+      <div>
+        <span class="step" data-step="2">Middle of the Z</span>
+        <h2>Main Checkout Story</h2>
+      </div>
+
+      <div class="description-grid">
+        <article class="description-card primary">
+          <h3>Architecture description container</h3>
+          <p><strong>Purpose:</strong> replace the rough architecture illustration with a polished diagram later. For now, this block states exactly what the diagram must show.</p>
+          <div class="flow-text">User submits checkout
+Frontend sends HTTP request to Orchestrator
+Orchestrator creates an order id and fans out gRPC init calls
+Transaction Verification, Fraud Detection, and Suggestions cache order data
+Verified orders enter the Order Queue
+Executor replicas elect one leader
+Leader dequeues the order and coordinates 2PC
+Payment and Books DB commit or abort together
+Books DB primary replicates committed stock to backups</div>
+          <div class="container-note">Reader takeaway: validation and commitment are separate decisions. The orchestrator accepts valid orders; the executor leader commits irreversible side effects.</div>
+        </article>
+
+        <div class="description-card">
+          <h3>Causal verification container</h3>
+          <p><strong>Purpose:</strong> explain concurrency without a fragile sketch.</p>
+          <div class="flow-text">init
+  a: items present
+    -> c: card format
+  b: user data
+    -> d: user fraud
+join c + d
+  -> e: card fraud
+  -> f: suggestions</div>
+          <p>Vector clocks make the partial order visible: `a` and `b` can run in parallel, then `c` and `d` can overlap before event `e` joins both branches.</p>
+
+          <div class="commit-note">
+            <h3>2PC container</h3>
+            <p><strong>Prepare:</strong> payment stages a charge; books DB checks stock and stages decrements.</p>
+            <p><strong>Decision:</strong> all YES means Commit; any NO or timeout means Abort.</p>
+            <p><strong>Known trade-off:</strong> 2PC can block after YES votes if the coordinator fails before publishing the decision.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="z-bottom">
+      <article class="panel hero">
+        <div>
+          <span class="step" data-step="3">Lower left</span>
+          <h2>Key Insights</h2>
+        </div>
+        <div class="insight-list">
+          <div class="insight">
+            <div class="num">1</div>
+            <p><strong>Causality is visible.</strong> Vector clocks show real concurrency, not just log order.</p>
+          </div>
+          <div class="insight">
+            <div class="num">2</div>
+            <p><strong>Side effects wait.</strong> Payment and stock changes happen only after Commit.</p>
+          </div>
+          <div class="insight">
+            <div class="num">3</div>
+            <p><strong>One leader acts.</strong> Bully election prevents executor replicas from processing the same queue item.</p>
+          </div>
+          <div class="insight">
+            <div class="num">4</div>
+            <p><strong>Retries are safe.</strong> Participants keep staged, committed, and aborted state per order.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel hero">
+        <div>
+          <span class="step" data-step="4">Lower right</span>
+          <h2>Challenges + Collaboration</h2>
+        </div>
+        <ul>
+          <li><strong>2PC blocking window:</strong> participants that voted YES cannot safely decide alone.</li>
+          <li><strong>Async checkout:</strong> frontend receives `accepted`, then polls for `committed` or `aborted`.</li>
+          <li><strong>Prototype durability:</strong> queue and status maps are in memory; Books DB replication is best effort.</li>
+        </ul>
+        <div class="timeline">
+          <div class="date">Feb 25</div>
+          <div class="event">Suggestions and transaction-verification services added.</div>
+          <div class="date">Mar 18</div>
+          <div class="event">Order flow refactored into init plus vector-clock event execution.</div>
+          <div class="date">Apr 6</div>
+          <div class="event">Order queue and replicated executors with bully election.</div>
+          <div class="date">May 5</div>
+          <div class="event">Payment, books database participant, 2PC, and recovery analysis.</div>
+          <div class="date">May 13</div>
+          <div class="event">Locust load-test scenarios on remote branches.</div>
+        </div>
+        <div class="print-note">Next design pass: replace the three text containers with final vector diagrams, keeping this same portrait Z-shaped layout.</div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
