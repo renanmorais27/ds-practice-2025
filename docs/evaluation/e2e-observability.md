@@ -50,8 +50,9 @@ In Grafana, check:
 - `Total Checkout Requests`
 - `Server Order Lifecycle (p95)`
 - `Executor & 2PC Outcomes`
-- `Payment Operations`
+- `Payment Operations & Open Staged Tx`
 - `DB Operations`
+- `DB Staging Activity`
 - Tempo trace search by `order.id`
 
 ## Automated Scenario Matrix
@@ -123,6 +124,7 @@ instrument type:
 ## Troubleshooting
 
 - Empty Grafana panels: wait a few seconds for OTLP export and Prometheus scrape intervals, then rerun traffic.
+- Open staged DB/payment transactions stay at `0`: this is healthy for fast 2PC commits. Use the prepare/commit activity lines to confirm staging happened; sustained nonzero open-staged values indicate transactions stuck between Prepare and Commit/Abort.
 - No traces: confirm services have `OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318`.
 - Locust timeouts: inspect `order_queue_depth`, `pending_orders_gauge`, executor dequeue metrics, and executor logs.
 - Suggestions errors: expected without `GOOGLE_API_KEY`; suggestions should fall back and remain non-fatal.

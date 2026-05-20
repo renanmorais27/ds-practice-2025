@@ -2,12 +2,34 @@ import os
 import time
 
 from opentelemetry import metrics
+from opentelemetry.metrics import Histogram
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.resources import Resource
 
 RUN_ID = os.environ.get("LOCUST_RUN_ID", time.strftime("%Y%m%d%H%M%S"))
+SECONDS_HISTOGRAM_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    2.5,
+    5.0,
+    7.5,
+    10.0,
+    25.0,
+    50.0,
+    75.0,
+    100.0,
+)
 
 _resource = Resource.create({
     "service.name": os.environ.get("OTEL_SERVICE_NAME", "locust"),
@@ -20,6 +42,13 @@ _provider = MeterProvider(
         PeriodicExportingMetricReader(
             OTLPMetricExporter(endpoint=f"{_endpoint}/v1/metrics"),
             export_interval_millis=1000,
+        )
+    ],
+    views=[
+        View(
+            instrument_type=Histogram,
+            instrument_name="*_seconds",
+            aggregation=ExplicitBucketHistogramAggregation(boundaries=SECONDS_HISTOGRAM_BUCKETS),
         )
     ],
 )

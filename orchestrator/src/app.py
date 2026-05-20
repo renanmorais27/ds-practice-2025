@@ -35,6 +35,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
 
+from opentelemetry import metrics
+
 project_root = os.path.abspath(os.path.join(FILE, "../../.."))
 sys.path.insert(0, project_root)
 from utils.observability import (

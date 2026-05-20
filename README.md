@@ -348,7 +348,7 @@ LOCUST_SCENARIO=same_book_conflict_low_stock LOCUST_RUN_ID=conflict-local \
   docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml --profile e2e up --build
 ```
 
-See [docs/evaluation/e2e-observability.md](docs/evaluation/e2e-observability.md) and [tests/locust/README.md](tests/locust/README.md) for the full scenario matrix and dashboard interpretation guide.
+See [docs/evaluation/e2e-observability.md](docs/evaluation/e2e-observability.md) and [tests/locust/README.md](tests/locust/README.md) for the full scenario matrix and dashboard interpretation guide. The implementation lesson is captured in [docs/solutions/integration-issues/e2e-observability-locust-grafana.md](docs/solutions/integration-issues/e2e-observability-locust-grafana.md).
 
 ## Project Structure
 

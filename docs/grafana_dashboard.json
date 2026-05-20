@@ -26,7 +26,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(increase(requests_counter_total{job=\"orchestrator\"}[1m])) by (status)",
+          "expr": "sum(increase(requests_counter_total{service_name=\"orchestrator\"}[1m])) by (status)",
           "legendFormat": "{{status}}",
           "refId": "A"
         }
@@ -45,7 +45,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum(rate(checkout_duration_seconds_bucket{job=\"orchestrator\"}[1m])) by (le, status))",
+          "expr": "histogram_quantile(0.95, sum(rate(checkout_duration_seconds_bucket{service_name=\"orchestrator\"}[1m])) by (le, status))",
           "legendFormat": "p95 {{status}}",
           "refId": "A"
         }
@@ -64,13 +64,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "active_orders{job=\"orchestrator\"}",
+          "expr": "active_orders{service_name=\"orchestrator\"}",
           "legendFormat": "active orders",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "pending_orders_gauge{job=\"orchestrator\"}",
+          "expr": "pending_orders_gauge{service_name=\"orchestrator\"}",
           "legendFormat": "pending orders",
           "refId": "B"
         },
@@ -128,14 +128,27 @@
       },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "id": 6,
-      "title": "Staged Transactions",
+      "title": "DB Staging Activity",
+      "description": "Open staged DB transactions should normally sit at 0 in a healthy fast 2PC flow. Prepare/commit lines show staging activity; a sustained open-staged value means transactions are stuck between Prepare and Commit/Abort.",
       "type": "timeseries",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "staged_transactions{role=\"primary\"}",
-          "legendFormat": "staged txs",
+          "legendFormat": "open staged DB txs (0 healthy)",
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(db_operations_total{operation=\"prepare\", result=\"staged\"}[1m]))",
+          "legendFormat": "DB prepare staged / 1m",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(db_operations_total{operation=\"commit\", result=\"committed\"}[1m]))",
+          "legendFormat": "DB commit committed / 1m",
+          "refId": "C"
         }
       ]
     },
@@ -303,7 +316,8 @@
       },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
       "id": 14,
-      "title": "Payment Operations",
+      "title": "Payment Operations & Open Staged Tx",
+      "description": "Open staged payment transactions should normally sit at 0 in a healthy fast 2PC flow. A sustained nonzero value means prepared payments are waiting for Commit/Abort.",
       "type": "timeseries",
       "targets": [
         {
@@ -315,7 +329,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "payment_staged_transactions",
-          "legendFormat": "staged payment txs",
+          "legendFormat": "open staged payment txs (0 healthy)",
           "refId": "B"
         }
       ]

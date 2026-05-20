@@ -3,10 +3,12 @@ import os
 from contextlib import nullcontext
 
 from opentelemetry import metrics, propagate, trace
+from opentelemetry.metrics import Histogram
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -14,6 +16,26 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 
 LOGGER = logging.getLogger(__name__)
 TRACE_CONTEXT_KEYS = {"traceparent", "tracestate", "baggage"}
+SECONDS_HISTOGRAM_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    2.5,
+    5.0,
+    7.5,
+    10.0,
+    25.0,
+    50.0,
+    75.0,
+    100.0,
+)
 
 _configured_services = set()
 
@@ -41,6 +63,15 @@ def configure_otel(service_name):
                     PeriodicExportingMetricReader(
                         OTLPMetricExporter(endpoint=f"{endpoint}/v1/metrics"),
                         export_interval_millis=export_interval,
+                    )
+                ],
+                views=[
+                    View(
+                        instrument_type=Histogram,
+                        instrument_name="*_seconds",
+                        aggregation=ExplicitBucketHistogramAggregation(
+                            boundaries=SECONDS_HISTOGRAM_BUCKETS
+                        ),
                     )
                 ],
             )

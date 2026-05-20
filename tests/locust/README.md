@@ -1,13 +1,8 @@
 # Locust E2E Evaluation
 
-These scenarios exercise the bookstore from `POST /checkout` through the final
-`/order-status/<orderId>` terminal state. HTTP request stats remain visible, but
-the primary correctness signal is the synthetic `E2E` Locust event emitted for
-`checkout_to_committed`, `checkout_to_aborted`, `checkout_to_denied`, and
-`checkout_timeout`.
+These scenarios exercise the bookstore from `POST /checkout` through the final `/order-status/<orderId>` terminal state. HTTP request stats remain visible, but the primary correctness signal is the synthetic `E2E` Locust event emitted for `checkout_to_committed`, `checkout_to_aborted`, `checkout_to_denied`, and `checkout_timeout`.
 
-Locust also exports OTLP metrics for active users, scenario attempts, terminal
-outcomes, failed lifecycle checks, and E2E duration.
+Locust also exports OTLP metrics for active users, scenario attempts, terminal outcomes, failed lifecycle checks, and E2E duration.
 
 ## Interactive Run
 
