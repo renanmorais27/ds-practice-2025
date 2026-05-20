@@ -1,5 +1,13 @@
 version: '3'
 services:
+  observability:
+    image: grafana/otel-lgtm
+    ports:
+      - "3000:3000"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - OTEL_METRIC_EXPORT_INTERVAL=1000
   frontend:
     build:
       # Use the current directory as the build context
@@ -30,6 +38,8 @@ services:
       # The PYTHONFILE environment variable specifies the absolute entry point of the application
       # Check app.py in the orchestrator directory to see how this is used
       - PYTHONFILE=/app/orchestrator/src/app.py
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=orchestrator
     volumes:
       # Mount the utils directory in the current directory to the /app/utils directory in the container
       - ./utils:/app/utils
@@ -119,6 +129,8 @@ services:
       - REPLICA_ROLE=primary
       - BACKUP_ADDRS=books_db_2:50060,books_db_3:50060
       - BOOKS_DB_JOURNAL=/tmp/books_db_journal.json
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=books_database
     volumes:
       - ./utils:/app/utils
       - ./books_database/src:/app/books_database/src
