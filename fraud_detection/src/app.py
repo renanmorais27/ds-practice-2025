@@ -31,24 +31,85 @@ from utils.vector_clock import (
     serialize_trace,
     tick,
 )
+from utils.observability import configure_otel, inject_trace_metadata, record_exception, server_span
 
+import functools
 import json
 import logging
+import time
 import grpc
 from concurrent import futures
 from threading import Lock
 
 logging.basicConfig(level=logging.INFO)
 
+tracer, meter = configure_otel(os.environ.get("OTEL_SERVICE_NAME", "fraud_detection"))
+fraud_operations_counter = meter.create_counter(
+    "fraud_operations_total",
+    description="Total number of fraud detection operations",
+)
+fraud_operation_duration = meter.create_histogram(
+    "fraud_operation_duration_seconds",
+    description="Duration of fraud detection operations in seconds",
+    unit="s",
+)
+
 order_cache = {}
 order_cache_lock = Lock()
 
 
 def _order_metadata(order_id, clock):
-    return (
+    return inject_trace_metadata((
         (ORDER_ID_METADATA_KEY, order_id),
         (VECTOR_CLOCK_METADATA_KEY, serialize_clock(clock)),
-    )
+    ))
+
+
+def _result_label(response):
+    if hasattr(response, "is_fraud"):
+        return "fraud" if response.is_fraud else "clean"
+    return "ok"
+
+
+def instrument_rpc(operation):
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, request, context):
+            metadata = metadata_to_dict(context.invocation_metadata())
+            order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
+            started = time.time()
+            with server_span(
+                tracer,
+                context,
+                f"fraud_detection.{operation}",
+                **{"order.id": order_id, "rpc.operation": operation},
+            ) as span:
+                try:
+                    response = fn(self, request, context)
+                    result = _result_label(response)
+                    fraud_operations_counter.add(
+                        1, {"operation": operation, "result": result}
+                    )
+                    fraud_operation_duration.record(
+                        time.time() - started, {"operation": operation, "result": result}
+                    )
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("rpc.result", result)
+                    return response
+                except Exception as exc:
+                    fraud_operations_counter.add(
+                        1, {"operation": operation, "result": "error"}
+                    )
+                    fraud_operation_duration.record(
+                        time.time() - started, {"operation": operation, "result": "error"}
+                    )
+                    if hasattr(span, "record_exception"):
+                        record_exception(span, exc)
+                    raise
+
+        return wrapper
+
+    return decorator
 
 
 def _set_trailing(context, clock, trace, extra=()):
@@ -81,6 +142,7 @@ class FraudDetectionService(fd_grpc.FraudDetectionServiceServicer):
 
     # ── Init (cache only) ──
 
+    @instrument_rpc("initialize")
     def InitializeFraudOrder(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -116,6 +178,7 @@ class FraudDetectionService(fd_grpc.FraudDetectionServiceServicer):
 
     # ── Event d: check user data for fraud ──
 
+    @instrument_rpc("check_user_fraud")
     def CheckUserFraud(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -149,6 +212,7 @@ class FraudDetectionService(fd_grpc.FraudDetectionServiceServicer):
 
     # ── Event e: check card data for fraud ──
 
+    @instrument_rpc("check_card_fraud")
     def CheckCardFraud(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -232,6 +296,7 @@ class FraudDetectionService(fd_grpc.FraudDetectionServiceServicer):
 
     # ── Clear (bonus) ──
 
+    @instrument_rpc("clear")
     def ClearFraudOrder(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")

@@ -9,6 +9,7 @@ import json
 from concurrent import futures
 
 import grpc
+from opentelemetry import metrics
 
 FILE = __file__ if "__file__" in globals() else os.getenv("PYTHONFILE", "")
 
@@ -36,6 +37,16 @@ sys.path.insert(0, pay_grpc_path)
 import payment_pb2 as payment_pb2
 import payment_pb2_grpc as payment_pb2_grpc
 
+project_root = os.path.abspath(os.path.join(FILE, "../../.."))
+sys.path.insert(0, project_root)
+from utils.observability import (
+    client_span,
+    configure_otel,
+    inject_trace_headers,
+    inject_trace_metadata,
+    record_exception,
+)
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -56,6 +67,50 @@ PREPARE_TIMEOUT = 5   # seconds per participant Prepare call
 FINALIZE_TIMEOUT = 5  # seconds per participant Commit/Abort call
 FINALIZE_RETRIES = 3  # bounded retries for Commit/Abort on transient failure
 FINALIZE_BACKOFF = 0.5  # seconds between retries
+
+tracer, meter = configure_otel(os.environ.get("OTEL_SERVICE_NAME", f"executor_{EXECUTOR_ID}"))
+executor_elections_counter = meter.create_counter(
+    "executor_elections_total",
+    description="Total number of executor election attempts",
+)
+executor_leader_changes_counter = meter.create_counter(
+    "executor_leader_changes_total",
+    description="Total number of executor leader changes",
+)
+executor_dequeue_counter = meter.create_counter(
+    "executor_dequeue_total",
+    description="Total number of executor dequeue attempts",
+)
+executor_order_duration = meter.create_histogram(
+    "executor_order_duration_seconds",
+    description="Duration of executor order processing in seconds",
+    unit="s",
+)
+executor_active_orders = meter.create_up_down_counter(
+    "executor_active_orders",
+    description="Number of orders currently being processed by executors",
+)
+two_pc_phase_duration = meter.create_histogram(
+    "two_pc_phase_duration_seconds",
+    description="Duration of 2PC participant calls in seconds",
+    unit="s",
+)
+two_pc_votes_counter = meter.create_counter(
+    "two_pc_votes_total",
+    description="Total number of 2PC participant votes",
+)
+two_pc_finalize_retries_counter = meter.create_counter(
+    "two_pc_finalize_retries_total",
+    description="Total number of 2PC finalize retries",
+)
+two_pc_finalize_failures_counter = meter.create_counter(
+    "two_pc_finalize_failures_total",
+    description="Total number of exhausted 2PC finalize calls",
+)
+orchestrator_outcome_notify_counter = meter.create_counter(
+    "orchestrator_outcome_notify_total",
+    description="Total number of executor-to-orchestrator outcome notifications",
+)
 
 
 def _dummy_amount(items):
@@ -135,64 +190,78 @@ class ExecutorNode:
     # Fix 1+5: Iterative loop with try/finally for _electing flag
     def start_election(self):
         """Bully algorithm: contact all higher-ID peers. Iterative, not recursive."""
-        while True:
-            with self._election_lock:
-                if self._electing:
-                    return
-                self._electing = True
-
-            try:
-                logging.info("[Executor %d] Starting election...", self.executor_id)
-                higher = self.higher_peers()
-
-                if not higher:
-                    self._declare_victory()
-                    return
-
-                # Send Election to all higher-ID peers
-                any_alive = False
-                for peer_id, addr in higher:
-                    try:
-                        with grpc.insecure_channel(addr) as channel:
-                            stub = ex_grpc.ExecutorServiceStub(channel)
-                            response = stub.Election(
-                                ex_pb2.ElectionRequest(candidateId=self.executor_id),
-                                timeout=ELECTION_TIMEOUT,
-                            )
-                            if response.alive:
-                                any_alive = True
-                                logging.info(
-                                    "[Executor %d] Peer %d is alive, standing down",
-                                    self.executor_id, peer_id,
-                                )
-                    except Exception:
-                        logging.info(
-                            "[Executor %d] Peer %d unreachable",
-                            self.executor_id, peer_id,
-                        )
-
-                if not any_alive:
-                    self._declare_victory()
-                    return
-
-                # Wait for a Victory message from a higher-ID peer
-                logging.info(
-                    "[Executor %d] Waiting for Victory from higher-ID peer...",
-                    self.executor_id,
-                )
-            finally:
+        with tracer.start_as_current_span(
+            "executor.election",
+            attributes={"executor.id": self.executor_id},
+        ) as span:
+            executor_elections_counter.add(1, {"executor_id": str(self.executor_id), "result": "started"})
+            while True:
                 with self._election_lock:
-                    self._electing = False
+                    if self._electing:
+                        executor_elections_counter.add(
+                            1, {"executor_id": str(self.executor_id), "result": "already_running"}
+                        )
+                        return
+                    self._electing = True
 
-            # Sleep outside the try/finally so _electing is already reset
-            time.sleep(ELECTION_TIMEOUT * 2)
-            if self.leader_id is not None:
-                return  # Victory received, done
-            # Otherwise loop back to retry
+                try:
+                    logging.info("[Executor %d] Starting election...", self.executor_id)
+                    higher = self.higher_peers()
+
+                    if not higher:
+                        self._declare_victory()
+                        span.set_attribute("election.result", "victory")
+                        return
+
+                    # Send Election to all higher-ID peers
+                    any_alive = False
+                    for peer_id, addr in higher:
+                        try:
+                            with grpc.insecure_channel(addr) as channel:
+                                stub = ex_grpc.ExecutorServiceStub(channel)
+                                response = stub.Election(
+                                    ex_pb2.ElectionRequest(candidateId=self.executor_id),
+                                    timeout=ELECTION_TIMEOUT,
+                                )
+                                if response.alive:
+                                    any_alive = True
+                                    logging.info(
+                                        "[Executor %d] Peer %d is alive, standing down",
+                                        self.executor_id, peer_id,
+                                    )
+                        except Exception:
+                            logging.info(
+                                "[Executor %d] Peer %d unreachable",
+                                self.executor_id, peer_id,
+                            )
+
+                    if not any_alive:
+                        self._declare_victory()
+                        span.set_attribute("election.result", "victory")
+                        return
+
+                    # Wait for a Victory message from a higher-ID peer
+                    logging.info(
+                        "[Executor %d] Waiting for Victory from higher-ID peer...",
+                        self.executor_id,
+                    )
+                    span.set_attribute("election.result", "standing_down")
+                finally:
+                    with self._election_lock:
+                        self._electing = False
+
+                # Sleep outside the try/finally so _electing is already reset
+                time.sleep(ELECTION_TIMEOUT * 2)
+                if self.leader_id is not None:
+                    return  # Victory received, done
+                # Otherwise loop back to retry
 
     def _declare_victory(self):
         """Broadcast Victory to all peers and become leader."""
         self.leader_id = self.executor_id
+        executor_leader_changes_counter.add(
+            1, {"executor_id": str(self.executor_id), "leader_id": str(self.executor_id)}
+        )
 
         logging.info("[Executor %d] I am the leader!", self.executor_id)
 
@@ -242,6 +311,13 @@ class ExecutorNode:
         Phase 2 (Commit/Abort): broadcast the decision with bounded retry on transient errors.
         Only Commit causes participants to execute their real side-effects; Prepare only stages.
         """
+        order_started = time.time()
+        outcome = "error"
+        executor_active_orders.add(1, {"executor_id": str(self.executor_id)})
+        execute_span = tracer.start_span(
+            "executor.execute_order",
+            attributes={"order.id": order_id, "executor.id": self.executor_id},
+        )
         amount = _dummy_amount(items)
 
         pay_ch = grpc.insecure_channel(PAYMENT_ADDR)
@@ -260,31 +336,67 @@ class ExecutorNode:
 
             # Phase 1 — Prepare.
             try:
-                resp = pay.Prepare(
-                    payment_pb2.PreparePaymentRequest(order_id=order_id, amount=amount),
-                    timeout=PREPARE_TIMEOUT,
-                )
+                phase_started = time.time()
+                with client_span(
+                    tracer,
+                    "2pc.prepare",
+                    **{"order.id": order_id, "2pc.participant": "payment"},
+                ):
+                    resp = pay.Prepare(
+                        payment_pb2.PreparePaymentRequest(order_id=order_id, amount=amount),
+                        metadata=inject_trace_metadata(),
+                        timeout=PREPARE_TIMEOUT,
+                    )
                 votes["payment"] = bool(resp.ready)
                 reasons["payment"] = resp.reason or ("ready" if resp.ready else "not ready")
+                vote = "yes" if resp.ready else "no"
+                two_pc_votes_counter.add(1, {"participant": "payment", "vote": vote})
+                two_pc_phase_duration.record(
+                    time.time() - phase_started,
+                    {"phase": "prepare", "participant": "payment", "outcome": vote},
+                )
             except Exception as e:
                 logging.warning("[Executor %d] Prepare to payment failed: %s", self.executor_id, e)
                 votes["payment"] = False
                 reasons["payment"] = f"exception: {e}"
+                two_pc_votes_counter.add(1, {"participant": "payment", "vote": "error"})
+                two_pc_phase_duration.record(
+                    time.time() - phase_started,
+                    {"phase": "prepare", "participant": "payment", "outcome": "error"},
+                )
 
             try:
-                resp = db.Prepare(
-                    db_pb2.PrepareStockRequest(
-                        order_id=order_id,
-                        items=[db_pb2.StockItem(title=i.title, quantity=i.quantity) for i in items],
-                    ),
-                    timeout=PREPARE_TIMEOUT,
-                )
+                phase_started = time.time()
+                with client_span(
+                    tracer,
+                    "2pc.prepare",
+                    **{"order.id": order_id, "2pc.participant": "books_db"},
+                ):
+                    resp = db.Prepare(
+                        db_pb2.PrepareStockRequest(
+                            order_id=order_id,
+                            items=[db_pb2.StockItem(title=i.title, quantity=i.quantity) for i in items],
+                        ),
+                        metadata=inject_trace_metadata(),
+                        timeout=PREPARE_TIMEOUT,
+                    )
                 votes["books_db"] = bool(resp.ready)
                 reasons["books_db"] = resp.reason or ("ready" if resp.ready else "not ready")
+                vote = "yes" if resp.ready else "no"
+                two_pc_votes_counter.add(1, {"participant": "books_db", "vote": vote})
+                two_pc_phase_duration.record(
+                    time.time() - phase_started,
+                    {"phase": "prepare", "participant": "books_db", "outcome": vote},
+                )
             except Exception as e:
                 logging.warning("[Executor %d] Prepare to books_db failed: %s", self.executor_id, e)
                 votes["books_db"] = False
                 reasons["books_db"] = f"exception: {e}"
+                two_pc_votes_counter.add(1, {"participant": "books_db", "vote": "error"})
+                two_pc_phase_duration.record(
+                    time.time() - phase_started,
+                    {"phase": "prepare", "participant": "books_db", "outcome": "error"},
+                )
 
             logging.info(
                 "[Executor %d] 2PC %s: votes collected: %s",
@@ -303,6 +415,7 @@ class ExecutorNode:
                     self.executor_id, order_id,
                 )
                 self._notify_orchestrator(order_id, "committed", "")
+                outcome = "committed"
                 return True
 
             reason = "; ".join(f"{n}: {reasons[n]}" for n, v in votes.items() if not v)
@@ -316,8 +429,19 @@ class ExecutorNode:
                 self.executor_id, order_id,
             )
             self._notify_orchestrator(order_id, "aborted", reason)
+            outcome = "aborted"
             return False
+        except Exception as exc:
+            record_exception(execute_span, exc)
+            raise
         finally:
+            execute_span.set_attribute("order.outcome", outcome)
+            execute_span.end()
+            executor_active_orders.add(-1, {"executor_id": str(self.executor_id)})
+            executor_order_duration.record(
+                time.time() - order_started,
+                {"executor_id": str(self.executor_id), "outcome": outcome},
+            )
             try:
                 pay_ch.close()
             finally:
@@ -332,26 +456,51 @@ class ExecutorNode:
         if verb == "Commit":
             calls = [
                 ("payment", lambda: pay.Commit(
-                    payment_pb2.CommitRequest(order_id=order_id), timeout=FINALIZE_TIMEOUT)),
+                    payment_pb2.CommitRequest(order_id=order_id),
+                    metadata=inject_trace_metadata(),
+                    timeout=FINALIZE_TIMEOUT)),
                 ("books_db", lambda: db.Commit(
-                    db_pb2.CommitRequest(order_id=order_id), timeout=FINALIZE_TIMEOUT)),
+                    db_pb2.CommitRequest(order_id=order_id),
+                    metadata=inject_trace_metadata(),
+                    timeout=FINALIZE_TIMEOUT)),
             ]
         elif verb == "Abort":
             calls = [
                 ("payment", lambda: pay.Abort(
-                    payment_pb2.AbortRequest(order_id=order_id), timeout=FINALIZE_TIMEOUT)),
+                    payment_pb2.AbortRequest(order_id=order_id),
+                    metadata=inject_trace_metadata(),
+                    timeout=FINALIZE_TIMEOUT)),
                 ("books_db", lambda: db.Abort(
-                    db_pb2.AbortRequest(order_id=order_id), timeout=FINALIZE_TIMEOUT)),
+                    db_pb2.AbortRequest(order_id=order_id),
+                    metadata=inject_trace_metadata(),
+                    timeout=FINALIZE_TIMEOUT)),
             ]
         else:
             raise ValueError(f"unknown finalize verb: {verb}")
 
         for name, call in calls:
             for attempt in range(1, FINALIZE_RETRIES + 1):
+                phase_started = time.time()
                 try:
-                    call()
+                    with client_span(
+                        tracer,
+                        "2pc.finalize",
+                        **{"order.id": order_id, "2pc.participant": name, "2pc.verb": verb},
+                    ):
+                        call()
+                    two_pc_phase_duration.record(
+                        time.time() - phase_started,
+                        {"phase": verb.lower(), "participant": name, "outcome": "success"},
+                    )
                     break
                 except Exception as e:
+                    two_pc_finalize_retries_counter.add(
+                        1, {"participant": name, "verb": verb.lower()}
+                    )
+                    two_pc_phase_duration.record(
+                        time.time() - phase_started,
+                        {"phase": verb.lower(), "participant": name, "outcome": "error"},
+                    )
                     logging.warning(
                         "[Executor %d] %s to %s failed (attempt %d/%d): %s",
                         self.executor_id, verb, name, attempt, FINALIZE_RETRIES, e,
@@ -365,19 +514,32 @@ class ExecutorNode:
                     "[Executor %d] %s to %s exhausted retries — giving up on this run",
                     self.executor_id, verb, name,
                 )
+                two_pc_finalize_failures_counter.add(
+                    1, {"participant": name, "verb": verb.lower()}
+                )
 
     def _notify_orchestrator(self, order_id, outcome, reason):
         """Best-effort POST to orchestrator so the frontend's status poll can resolve."""
         body = json.dumps({"orderId": order_id, "outcome": outcome, "reason": reason}).encode("utf-8")
-        req = urllib.request.Request(
-            ORCHESTRATOR_OUTCOME_URL, data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=3):
-                pass
+            with client_span(
+                tracer,
+                "orchestrator.notify_outcome",
+                **{"order.id": order_id, "order.outcome": outcome},
+            ):
+                headers = inject_trace_headers({"Content-Type": "application/json"})
+                req = urllib.request.Request(
+                    ORCHESTRATOR_OUTCOME_URL, data=body, headers=headers, method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=3):
+                    pass
+            orchestrator_outcome_notify_counter.add(
+                1, {"outcome": outcome, "result": "success"}
+            )
         except Exception as e:
+            orchestrator_outcome_notify_counter.add(
+                1, {"outcome": outcome, "result": "error"}
+            )
             logging.warning(
                 "[Executor %d] could not notify orchestrator for %s: %s",
                 self.executor_id, order_id, e,
@@ -391,8 +553,15 @@ class ExecutorNode:
         try:
             while self.leader_id == self.executor_id:
                 try:
-                    response = oq_stub.Dequeue(oq_pb2.DequeueRequest(), timeout=5)
+                    response = oq_stub.Dequeue(
+                        oq_pb2.DequeueRequest(),
+                        metadata=inject_trace_metadata(),
+                        timeout=5,
+                    )
                     if response.found:
+                        executor_dequeue_counter.add(
+                            1, {"executor_id": str(self.executor_id), "result": "found"}
+                        )
                         logging.info(
                             "[Executor %d] Executing order %s (%d items)...",
                             self.executor_id, response.orderId, len(response.items),
@@ -403,10 +572,16 @@ class ExecutorNode:
                             self.executor_id, response.orderId,
                         )
                     else:
+                        executor_dequeue_counter.add(
+                            1, {"executor_id": str(self.executor_id), "result": "empty"}
+                        )
                         logging.debug(
                             "[Executor %d] Queue empty, waiting...", self.executor_id,
                         )
                 except Exception as e:
+                    executor_dequeue_counter.add(
+                        1, {"executor_id": str(self.executor_id), "result": "error"}
+                    )
                     logging.error(
                         "[Executor %d] Error dequeuing: %s", self.executor_id, e,
                     )
@@ -446,6 +621,19 @@ class ExecutorNode:
 
 def serve():
     node = ExecutorNode()
+
+    def _leader_callback(_options):
+        leader = node.leader_id
+        yield metrics.Observation(
+            1 if leader == node.executor_id else 0,
+            {"executor_id": str(node.executor_id), "leader_id": str(leader or "unknown")},
+        )
+
+    meter.create_observable_gauge(
+        "executor_is_leader",
+        callbacks=[_leader_callback],
+        description="Whether this executor replica currently believes it is the leader",
+    )
 
     # Start gRPC server for incoming Election/Victory RPCs
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))

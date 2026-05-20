@@ -62,6 +62,8 @@ services:
       # The PYTHONFILE environment variable specifies the absolute entry point of the application
       # Check app.py in the fraud_detection directory to see how this is used
       - PYTHONFILE=/app/fraud_detection/src/app.py
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=fraud_detection
 
     volumes:
       # Mount the utils directory in the current directory to the /app/utils directory in the container
@@ -78,6 +80,8 @@ services:
       - PYTHONUNBUFFERED=TRUE
       - PYTHONFILE=/app/suggestions/src/app.py
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=suggestions
 
     volumes:
       - ./utils:/app/utils
@@ -91,6 +95,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=TRUE
       - PYTHONFILE=/app/transaction_verification/src/app.py
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=transaction_verification
     volumes:
       - ./utils:/app/utils
       - ./transaction_verification/src:/app/transaction_verification/src
@@ -102,6 +108,8 @@ services:
       - 50054:50054
     environment:
       - PYTHONUNBUFFERED=TRUE
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=order_queue
     volumes:
       - ./utils:/app/utils
       - ./order_queue/src:/app/order_queue/src
@@ -114,6 +122,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=TRUE
       - PYTHONFILE=/app/payment/src/app.py
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=payment
     volumes:
       - ./utils:/app/utils
       - ./payment/src:/app/payment/src
@@ -144,6 +154,8 @@ services:
       - PYTHONUNBUFFERED=TRUE
       - PYTHONFILE=/app/books_database/src/app.py
       - REPLICA_ROLE=backup
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=books_database_backup_2
     volumes:
       - ./utils:/app/utils
       - ./books_database/src:/app/books_database/src
@@ -157,6 +169,8 @@ services:
       - PYTHONUNBUFFERED=TRUE
       - PYTHONFILE=/app/books_database/src/app.py
       - REPLICA_ROLE=backup
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=books_database_backup_3
     volumes:
       - ./utils:/app/utils
       - ./books_database/src:/app/books_database/src
@@ -174,6 +188,8 @@ services:
       - BOOKS_DB_ADDR=books_db_1:50060
       - PAYMENT_ADDR=payment:50058
       - ORCHESTRATOR_OUTCOME_URL=http://orchestrator:5000/internal/order-outcome
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=executor_1
     volumes:
       - ./utils:/app/utils
       - ./executor/src:/app/executor/src
@@ -191,6 +207,8 @@ services:
       - BOOKS_DB_ADDR=books_db_1:50060
       - PAYMENT_ADDR=payment:50058
       - ORCHESTRATOR_OUTCOME_URL=http://orchestrator:5000/internal/order-outcome
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=executor_2
     volumes:
       - ./utils:/app/utils
       - ./executor/src:/app/executor/src
@@ -208,6 +226,23 @@ services:
       - BOOKS_DB_ADDR=books_db_1:50060
       - PAYMENT_ADDR=payment:50058
       - ORCHESTRATOR_OUTCOME_URL=http://orchestrator:5000/internal/order-outcome
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=executor_3
     volumes:
       - ./utils:/app/utils
       - ./executor/src:/app/executor/src
+  locust:
+    image: locustio/locust:2.32.9
+    profiles:
+      - e2e
+    ports:
+      - "8089:8089"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observability:4318
+      - OTEL_SERVICE_NAME=locust
+      - LOCUST_SCENARIO=${LOCUST_SCENARIO:-happy_non_conflicting}
+      - LOCUST_RUN_ID=${LOCUST_RUN_ID:-local}
+    volumes:
+      - ./tests/locust:/mnt/locust
+    entrypoint: /bin/sh
+    command: -c "pip install --no-cache-dir -r /mnt/locust/requirements.txt && locust -f /mnt/locust/e2e.py --host http://orchestrator:5000"

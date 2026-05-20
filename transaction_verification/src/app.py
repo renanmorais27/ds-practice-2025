@@ -33,9 +33,18 @@ from utils.vector_clock import (
     serialize_trace,
     tick,
 )
+from utils.observability import (
+    client_span,
+    configure_otel,
+    inject_trace_metadata,
+    record_exception,
+    server_span,
+)
 
+import functools
 import logging
 import re
+import time
 from datetime import datetime
 import grpc
 from concurrent import futures
@@ -44,15 +53,73 @@ from threading import Lock, Event as ThreadEvent
 
 logging.basicConfig(level=logging.INFO)
 
+tracer, meter = configure_otel(os.environ.get("OTEL_SERVICE_NAME", "transaction_verification"))
+verification_operations_counter = meter.create_counter(
+    "verification_operations_total",
+    description="Total number of transaction verification operations",
+)
+verification_duration = meter.create_histogram(
+    "verification_operation_duration_seconds",
+    description="Duration of transaction verification operations in seconds",
+    unit="s",
+)
+
 order_cache = {}
 order_cache_lock = Lock()
 
 
 def _order_metadata(order_id, clock):
-    return (
+    return inject_trace_metadata((
         (ORDER_ID_METADATA_KEY, order_id),
         (VECTOR_CLOCK_METADATA_KEY, serialize_clock(clock)),
-    )
+    ))
+
+
+def _result_label(response):
+    if hasattr(response, "is_valid"):
+        return "valid" if response.is_valid else "invalid"
+    return "ok"
+
+
+def instrument_rpc(operation):
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, request, context):
+            metadata = metadata_to_dict(context.invocation_metadata())
+            order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
+            started = time.time()
+            with server_span(
+                tracer,
+                context,
+                f"transaction_verification.{operation}",
+                **{"order.id": order_id, "rpc.operation": operation},
+            ) as span:
+                try:
+                    response = fn(self, request, context)
+                    result = _result_label(response)
+                    verification_operations_counter.add(
+                        1, {"operation": operation, "result": result}
+                    )
+                    verification_duration.record(
+                        time.time() - started, {"operation": operation, "result": result}
+                    )
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("rpc.result", result)
+                    return response
+                except Exception as exc:
+                    verification_operations_counter.add(
+                        1, {"operation": operation, "result": "error"}
+                    )
+                    verification_duration.record(
+                        time.time() - started, {"operation": operation, "result": "error"}
+                    )
+                    if hasattr(span, "record_exception"):
+                        record_exception(span, exc)
+                    raise
+
+        return wrapper
+
+    return decorator
 
 
 def _set_trailing(context, clock, trace, extra=()):
@@ -85,6 +152,7 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
     # ── Init (cache only, no business logic) ──
 
+    @instrument_rpc("initialize")
     def InitializeVerificationOrder(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -122,6 +190,7 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
     # ── Event a: check items not empty ──
 
+    @instrument_rpc("check_items_not_empty")
     def CheckItemsNotEmpty(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -142,6 +211,7 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
     # ── Event b: check mandatory user data ──
 
+    @instrument_rpc("check_mandatory_user_data")
     def CheckMandatoryUserData(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -183,6 +253,7 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
     # ── Event c: check card format ──
 
+    @instrument_rpc("check_card_format")
     def CheckCardFormat(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -216,6 +287,7 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
     # ── StartVerificationFlow: orchestrates a→c, b→d, join→e→f ──
 
+    @instrument_rpc("start_verification_flow")
     def StartVerificationFlow(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -236,11 +308,12 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
             """a → c (both in TV)"""
             try:
                 # Event a
-                with grpc.insecure_channel("localhost:50052") as ch:
-                    stub = tv_grpc.TransactionVerificationServiceStub(ch)
-                    res_a, call_a = stub.CheckItemsNotEmpty.with_call(
-                        tv_pb2.Empty(), metadata=_order_metadata(order_id, parent_clock),
-                    )
+                with client_span(tracer, "verification.stage.a", **{"order.id": order_id}):
+                    with grpc.insecure_channel("localhost:50052") as ch:
+                        stub = tv_grpc.TransactionVerificationServiceStub(ch)
+                        res_a, call_a = stub.CheckItemsNotEmpty.with_call(
+                            tv_pb2.Empty(), metadata=_order_metadata(order_id, parent_clock),
+                        )
                 meta_a = metadata_to_dict(call_a.trailing_metadata())
                 clock_a = deserialize_clock(meta_a.get(VECTOR_CLOCK_METADATA_KEY))
                 trace_a = deserialize_trace(meta_a.get(EVENT_TRACE_METADATA_KEY))
@@ -254,11 +327,12 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
                     return False, clock_a, trace_a
 
                 # Event c (depends on a)
-                with grpc.insecure_channel("localhost:50052") as ch:
-                    stub = tv_grpc.TransactionVerificationServiceStub(ch)
-                    res_c, call_c = stub.CheckCardFormat.with_call(
-                        tv_pb2.Empty(), metadata=_order_metadata(order_id, clock_a),
-                    )
+                with client_span(tracer, "verification.stage.c", **{"order.id": order_id}):
+                    with grpc.insecure_channel("localhost:50052") as ch:
+                        stub = tv_grpc.TransactionVerificationServiceStub(ch)
+                        res_c, call_c = stub.CheckCardFormat.with_call(
+                            tv_pb2.Empty(), metadata=_order_metadata(order_id, clock_a),
+                        )
                 meta_c = metadata_to_dict(call_c.trailing_metadata())
                 clock_c = deserialize_clock(meta_c.get(VECTOR_CLOCK_METADATA_KEY))
                 trace_c = deserialize_trace(meta_c.get(EVENT_TRACE_METADATA_KEY))
@@ -278,11 +352,12 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
             """b (in TV) → d (calls FD)"""
             try:
                 # Event b
-                with grpc.insecure_channel("localhost:50052") as ch:
-                    stub = tv_grpc.TransactionVerificationServiceStub(ch)
-                    res_b, call_b = stub.CheckMandatoryUserData.with_call(
-                        tv_pb2.Empty(), metadata=_order_metadata(order_id, parent_clock),
-                    )
+                with client_span(tracer, "verification.stage.b", **{"order.id": order_id}):
+                    with grpc.insecure_channel("localhost:50052") as ch:
+                        stub = tv_grpc.TransactionVerificationServiceStub(ch)
+                        res_b, call_b = stub.CheckMandatoryUserData.with_call(
+                            tv_pb2.Empty(), metadata=_order_metadata(order_id, parent_clock),
+                        )
                 meta_b = metadata_to_dict(call_b.trailing_metadata())
                 clock_b = deserialize_clock(meta_b.get(VECTOR_CLOCK_METADATA_KEY))
                 trace_b = deserialize_trace(meta_b.get(EVENT_TRACE_METADATA_KEY))
@@ -296,11 +371,12 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
                     return False, clock_b, trace_b
 
                 # Event d (calls FD CheckUserFraud, depends on b)
-                with grpc.insecure_channel("fraud_detection:50051") as ch:
-                    stub = fd_grpc.FraudDetectionServiceStub(ch)
-                    res_d, call_d = stub.CheckUserFraud.with_call(
-                        fd_pb2.Empty(), metadata=_order_metadata(order_id, clock_b),
-                    )
+                with client_span(tracer, "verification.stage.d", **{"order.id": order_id}):
+                    with grpc.insecure_channel("fraud_detection:50051") as ch:
+                        stub = fd_grpc.FraudDetectionServiceStub(ch)
+                        res_d, call_d = stub.CheckUserFraud.with_call(
+                            fd_pb2.Empty(), metadata=_order_metadata(order_id, clock_b),
+                        )
                 meta_d = metadata_to_dict(call_d.trailing_metadata())
                 clock_d = deserialize_clock(meta_d.get(VECTOR_CLOCK_METADATA_KEY))
                 trace_d = deserialize_trace(meta_d.get(EVENT_TRACE_METADATA_KEY))
@@ -351,11 +427,12 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
         # Event e: call FD CheckCardFraud (depends on c AND d)
         try:
-            with grpc.insecure_channel("fraud_detection:50051") as ch:
-                stub = fd_grpc.FraudDetectionServiceStub(ch)
-                res_e, call_e = stub.CheckCardFraud.with_call(
-                    fd_pb2.Empty(), metadata=_order_metadata(order_id, join_clock),
-                )
+            with client_span(tracer, "verification.stage.e_f", **{"order.id": order_id}):
+                with grpc.insecure_channel("fraud_detection:50051") as ch:
+                    stub = fd_grpc.FraudDetectionServiceStub(ch)
+                    res_e, call_e = stub.CheckCardFraud.with_call(
+                        fd_pb2.Empty(), metadata=_order_metadata(order_id, join_clock),
+                    )
             meta_e = metadata_to_dict(call_e.trailing_metadata())
             clock_e = deserialize_clock(meta_e.get(VECTOR_CLOCK_METADATA_KEY))
             trace_e = deserialize_trace(meta_e.get(EVENT_TRACE_METADATA_KEY))
@@ -398,6 +475,7 @@ class TransactionVerificationService(tv_grpc.TransactionVerificationServiceServi
 
     # ── Clear (bonus) ──
 
+    @instrument_rpc("clear")
     def ClearVerificationOrder(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")

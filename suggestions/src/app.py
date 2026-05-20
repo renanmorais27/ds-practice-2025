@@ -24,14 +24,28 @@ from utils.vector_clock import (
     serialize_trace,
     tick,
 )
+from utils.observability import configure_otel, record_exception, server_span
 
+import functools
 import logging
+import time
 import grpc
 from concurrent import futures
 from threading import Lock
 from google import genai
 
 logging.basicConfig(level=logging.INFO)
+
+tracer, meter = configure_otel(os.environ.get("OTEL_SERVICE_NAME", "suggestions"))
+suggestions_operations_counter = meter.create_counter(
+    "suggestions_operations_total",
+    description="Total number of suggestions operations",
+)
+suggestions_operation_duration = meter.create_histogram(
+    "suggestions_operation_duration_seconds",
+    description="Duration of suggestions operations in seconds",
+    unit="s",
+)
 
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 order_cache = {}
@@ -48,6 +62,53 @@ def _set_trailing(context, clock, trace):
         (VECTOR_CLOCK_METADATA_KEY, serialize_clock(clock)),
         (EVENT_TRACE_METADATA_KEY, serialize_trace(trace)),
     ))
+
+
+def _result_label(response):
+    if hasattr(response, "books"):
+        return "suggested" if response.books else "empty"
+    return "ok"
+
+
+def instrument_rpc(operation):
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, request, context):
+            metadata = metadata_to_dict(context.invocation_metadata())
+            order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
+            started = time.time()
+            with server_span(
+                tracer,
+                context,
+                f"suggestions.{operation}",
+                **{"order.id": order_id, "rpc.operation": operation},
+            ) as span:
+                try:
+                    response = fn(self, request, context)
+                    result = _result_label(response)
+                    suggestions_operations_counter.add(
+                        1, {"operation": operation, "result": result}
+                    )
+                    suggestions_operation_duration.record(
+                        time.time() - started, {"operation": operation, "result": result}
+                    )
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("rpc.result", result)
+                    return response
+                except Exception as exc:
+                    suggestions_operations_counter.add(
+                        1, {"operation": operation, "result": "error"}
+                    )
+                    suggestions_operation_duration.record(
+                        time.time() - started, {"operation": operation, "result": "error"}
+                    )
+                    if hasattr(span, "record_exception"):
+                        record_exception(span, exc)
+                    raise
+
+        return wrapper
+
+    return decorator
 
 
 class SuggestionsService(sg_grpc.SuggestionsServiceServicer):
@@ -71,6 +132,7 @@ class SuggestionsService(sg_grpc.SuggestionsServiceServicer):
 
     # ── Init (cache only) ──
 
+    @instrument_rpc("initialize")
     def InitializeSuggestionsOrder(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -99,6 +161,7 @@ class SuggestionsService(sg_grpc.SuggestionsServiceServicer):
 
     # ── Event f: generate suggestions ──
 
+    @instrument_rpc("generate")
     def GenerateSuggestions(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")
@@ -150,6 +213,7 @@ class SuggestionsService(sg_grpc.SuggestionsServiceServicer):
 
     # ── Clear (bonus) ──
 
+    @instrument_rpc("clear")
     def ClearSuggestionsOrder(self, request, context):
         metadata = metadata_to_dict(context.invocation_metadata())
         order_id = metadata.get(ORDER_ID_METADATA_KEY, "")

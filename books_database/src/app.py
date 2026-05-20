@@ -7,15 +7,7 @@ import time
 from concurrent import futures
 
 import grpc
-
-from opentelemetry import trace, metrics
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-from opentelemetry.sdk.resources import Resource
+from opentelemetry import metrics
 
 FILE = __file__ if "__file__" in globals() else os.getenv("PYTHONFILE", "")
 
@@ -24,33 +16,18 @@ sys.path.insert(0, db_grpc_path)
 import books_database_pb2 as db_pb2
 import books_database_pb2_grpc as db_grpc
 
+project_root = os.path.abspath(os.path.join(FILE, "../../.."))
+sys.path.insert(0, project_root)
+from utils.observability import configure_otel, inject_trace_metadata, record_exception, server_span
+
 logging.basicConfig(level=logging.INFO)
 
 REPLICA_ROLE = os.environ.get("REPLICA_ROLE", "backup")  # "primary" or "backup"
 BACKUP_ADDRS = os.environ.get("BACKUP_ADDRS", "")        # comma-separated, primary only
 JOURNAL_PATH = os.environ.get("BOOKS_DB_JOURNAL", "")     # if set, persist _tx across restarts
 
-_otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://observability:4318")
 _service_name = os.environ.get("OTEL_SERVICE_NAME", "books_database")
-_resource = Resource.create({"service.name": _service_name})
-
-_tracer_provider = TracerProvider(resource=_resource)
-_tracer_provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{_otel_endpoint}/v1/traces"))
-)
-trace.set_tracer_provider(_tracer_provider)
-
-_meter_provider = MeterProvider(
-    resource=_resource,
-    metric_readers=[PeriodicExportingMetricReader(
-        OTLPMetricExporter(endpoint=f"{_otel_endpoint}/v1/metrics"),
-        export_interval_millis=5000,
-    )],
-)
-metrics.set_meter_provider(_meter_provider)
-
-tracer = trace.get_tracer(_service_name)
-meter = metrics.get_meter(_service_name)
+tracer, meter = configure_otel(_service_name)
 
 db_operations_counter = meter.create_counter(
     "db_operations_total",
@@ -65,11 +42,25 @@ operation_duration = meter.create_histogram(
     description="Duration of database operations in seconds",
     unit="s",
 )
+db_replication_attempts_counter = meter.create_counter(
+    "db_replication_attempts_total",
+    description="Total number of primary-to-backup replication attempts",
+)
+db_replication_duration = meter.create_histogram(
+    "db_replication_duration_seconds",
+    description="Duration of primary-to-backup replication attempts in seconds",
+    unit="s",
+)
 
 INITIAL_STOCK = {
     "Distributed systems.": 5000,
     "Introduction to gRPC.": 5000,
 }
+
+try:
+    INITIAL_STOCK.update(json.loads(os.environ.get("BOOKS_DB_INITIAL_STOCK_JSON", "{}")))
+except Exception as e:
+    logging.warning("invalid BOOKS_DB_INITIAL_STOCK_JSON ignored: %s", e)
 
 STAGED, COMMITTED, ABORTED = "staged", "committed", "aborted"
 
@@ -135,12 +126,13 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
 
     def Read(self, request, context):
         _t0 = time.time()
-        with self._lock:
-            stock = self.store.get(request.title, 0)
-        db_operations_counter.add(1, {"operation": "read", "role": REPLICA_ROLE})
-        operation_duration.record(time.time() - _t0, {"operation": "read"})
-        logging.info("Read '%s' -> stock=%d", request.title, stock)
-        return db_pb2.ReadResponse(stock=stock)
+        with server_span(tracer, context, "db.read", **{"db.book": request.title}):
+            with self._lock:
+                stock = self.store.get(request.title, 0)
+            db_operations_counter.add(1, {"operation": "read", "role": REPLICA_ROLE})
+            operation_duration.record(time.time() - _t0, {"operation": "read"})
+            logging.info("Read '%s' -> stock=%d", request.title, stock)
+            return db_pb2.ReadResponse(stock=stock)
 
     def Write(self, request, context):
         with self._lock:
@@ -159,9 +151,12 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
 
     def Prepare(self, request, context):
         _t0 = time.time()
-        with tracer.start_as_current_span("db.prepare") as span:
-            span.set_attribute("order.id", request.order_id)
-            span.set_attribute("db.items_count", len(request.items))
+        with server_span(
+            tracer,
+            context,
+            "db.prepare",
+            **{"order.id": request.order_id, "db.items_count": len(request.items)},
+        ) as span:
 
             for item in request.items:
                 if item.quantity <= 0:
@@ -206,8 +201,7 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
 
     def Commit(self, request, context):
         _t0 = time.time()
-        with tracer.start_as_current_span("db.commit") as span:
-            span.set_attribute("order.id", request.order_id)
+        with server_span(tracer, context, "db.commit", **{"order.id": request.order_id}) as span:
 
             replicate_values = None
             with self._lock:
@@ -232,21 +226,22 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
             return db_pb2.CommitResponse(success=True)
 
     def Abort(self, request, context):
-        with self._lock:
-            entry = self._tx.get(request.order_id)
-            was_staged = entry is not None and entry[0] == STAGED
-            if entry is None:
-                self._tx[request.order_id] = (ABORTED, [])
-                self._persist_journal_locked()
-            elif entry[0] == STAGED:
-                self._tx[request.order_id] = (ABORTED, [])
-                self._persist_journal_locked()
+        with server_span(tracer, context, "db.abort", **{"order.id": request.order_id}):
+            with self._lock:
+                entry = self._tx.get(request.order_id)
+                was_staged = entry is not None and entry[0] == STAGED
+                if entry is None:
+                    self._tx[request.order_id] = (ABORTED, [])
+                    self._persist_journal_locked()
+                elif entry[0] == STAGED:
+                    self._tx[request.order_id] = (ABORTED, [])
+                    self._persist_journal_locked()
 
-        if was_staged:
-            staged_tx_counter.add(-1, {"role": REPLICA_ROLE})
-        db_operations_counter.add(1, {"operation": "abort", "role": REPLICA_ROLE})
-        logging.info("Abort %s", request.order_id)
-        return db_pb2.AbortResponse(aborted=True)
+            if was_staged:
+                staged_tx_counter.add(-1, {"role": REPLICA_ROLE})
+            db_operations_counter.add(1, {"operation": "abort", "role": REPLICA_ROLE})
+            logging.info("Abort %s", request.order_id)
+            return db_pb2.AbortResponse(aborted=True)
 
     def _after_commit(self, replicate_values):
         """Hook for primary-to-backup replication. No-op on a pure backup."""
@@ -262,11 +257,30 @@ class PrimaryReplica(BooksDatabaseServicer):
 
     def _replicate(self, method_name, request):
         for addr in self._backup_addrs:
+            started = time.time()
             try:
                 with grpc.insecure_channel(addr) as channel:
                     stub = db_grpc.BooksDatabaseStub(channel)
-                    getattr(stub, method_name)(request, timeout=3)
+                    getattr(stub, method_name)(
+                        request,
+                        metadata=inject_trace_metadata(),
+                        timeout=3,
+                    )
+                db_replication_attempts_counter.add(
+                    1, {"backup": addr, "operation": method_name, "result": "success"}
+                )
+                db_replication_duration.record(
+                    time.time() - started,
+                    {"backup": addr, "operation": method_name, "result": "success"},
+                )
             except Exception as e:
+                db_replication_attempts_counter.add(
+                    1, {"backup": addr, "operation": method_name, "result": "error"}
+                )
+                db_replication_duration.record(
+                    time.time() - started,
+                    {"backup": addr, "operation": method_name, "result": "error"},
+                )
                 logging.warning("Failed to replicate %s to backup %s: %s", method_name, addr, e)
 
     def Write(self, request, context):
