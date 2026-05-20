@@ -73,6 +73,12 @@
           "expr": "pending_orders_gauge{job=\"orchestrator\"}",
           "legendFormat": "pending orders",
           "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "locust_active_users",
+          "legendFormat": "locust users {{scenario}}",
+          "refId": "C"
         }
       ]
     },
@@ -134,8 +140,239 @@
       ]
     },
     {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 8,
+      "title": "Locust E2E Outcomes",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(locust_scenario_outcomes_total[1m])) by (scenario, outcome)",
+          "legendFormat": "{{scenario}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(locust_scenario_failures_total[1m])) by (scenario, outcome)",
+          "legendFormat": "failure {{scenario}} / {{outcome}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 9,
+      "title": "Locust E2E Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(locust_e2e_duration_seconds_bucket[1m])) by (le, scenario, outcome))",
+          "legendFormat": "p50 {{scenario}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(locust_e2e_duration_seconds_bucket[1m])) by (le, scenario, outcome))",
+          "legendFormat": "p95 {{scenario}} / {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(locust_e2e_duration_seconds_bucket[1m])) by (le, scenario, outcome))",
+          "legendFormat": "p99 {{scenario}} / {{outcome}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 10,
+      "title": "Server Order Lifecycle (p50/p95/p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(order_server_lifecycle_duration_seconds_bucket[1m])) by (le, outcome, scenario))",
+          "legendFormat": "p50 {{scenario}} / {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(order_server_lifecycle_duration_seconds_bucket[1m])) by (le, outcome, scenario))",
+          "legendFormat": "p95 {{scenario}} / {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(order_server_lifecycle_duration_seconds_bucket[1m])) by (le, outcome, scenario))",
+          "legendFormat": "p99 {{scenario}} / {{outcome}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 11,
+      "title": "Queue Depth & Wait (p95)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "order_queue_depth",
+          "legendFormat": "queue depth",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(order_queue_wait_seconds_bucket[1m])) by (le))",
+          "legendFormat": "queue wait p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "id": 12,
+      "title": "Executor & 2PC Outcomes",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(two_pc_votes_total[1m])) by (participant, vote)",
+          "legendFormat": "{{participant}} vote {{vote}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(orchestrator_outcome_notify_total[1m])) by (outcome, result)",
+          "legendFormat": "notify {{outcome}} / {{result}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "id": 13,
+      "title": "2PC Phase Duration (p95)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(two_pc_phase_duration_seconds_bucket[1m])) by (le, phase, participant, outcome))",
+          "legendFormat": "{{phase}} / {{participant}} / {{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "id": 14,
+      "title": "Payment Operations",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(payment_operations_total[1m])) by (operation, result)",
+          "legendFormat": "{{operation}} / {{result}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "payment_staged_transactions",
+          "legendFormat": "staged payment txs",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "id": 15,
+      "title": "Verification/Fraud/Suggestions Operations",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(verification_operations_total[1m])) by (operation, result)",
+          "legendFormat": "TV {{operation}} / {{result}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(fraud_operations_total[1m])) by (operation, result)",
+          "legendFormat": "FD {{operation}} / {{result}}",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(suggestions_operations_total[1m])) by (operation, result)",
+          "legendFormat": "S {{operation}} / {{result}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "id": 16,
+      "title": "DB Replication",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(db_replication_attempts_total[1m])) by (backup, operation, result)",
+          "legendFormat": "{{backup}} / {{operation}} / {{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "datasource": { "type": "tempo", "uid": "tempo" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 64 },
       "id": 7,
       "title": "Orchestrator Traces",
       "type": "table",
@@ -154,7 +391,43 @@
   "refresh": "5s",
   "schemaVersion": 38,
   "tags": ["observability", "distributed-systems"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(locust_scenario_outcomes_total, run_id)",
+        "includeAll": true,
+        "multi": true,
+        "name": "run_id",
+        "query": { "query": "label_values(locust_scenario_outcomes_total, run_id)", "refId": "PrometheusVariableQueryEditor-RunId" },
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(locust_scenario_outcomes_total, scenario)",
+        "includeAll": true,
+        "multi": true,
+        "name": "scenario",
+        "query": { "query": "label_values(locust_scenario_outcomes_total, scenario)", "refId": "PrometheusVariableQueryEditor-Scenario" },
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(target_info, service_name)",
+        "includeAll": true,
+        "multi": true,
+        "name": "service",
+        "query": { "query": "label_values(target_info, service_name)", "refId": "PrometheusVariableQueryEditor-Service" },
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",

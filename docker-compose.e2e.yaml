@@ -1,0 +1,4 @@
+services:
+  books_db_1:
+    environment:
+      - 'BOOKS_DB_INITIAL_STOCK_JSON={"Distributed systems.": 1, "Introduction to gRPC.": 5000}'

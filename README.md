@@ -304,8 +304,51 @@ docker compose up --build
 ```
 
 The frontend will be available at [http://localhost:8080](http://localhost:8080).
+The orchestrator API is available at [http://localhost:8081](http://localhost:8081).
+Grafana is available at [http://localhost:3000](http://localhost:3000) with the default `admin` / `admin` login.
 
 Code changes are hot-reloaded automatically — no restart needed during development.
+
+### E2E Testing and Observability
+
+The stack includes `grafana/otel-lgtm` for local OpenTelemetry metrics and traces. Prometheus is used for metrics and Tempo for traces inside Grafana.
+
+To run the app with the Locust web UI:
+
+```bash
+docker compose --profile e2e up --build
+```
+
+Open:
+
+- Frontend: [http://localhost:8080](http://localhost:8080)
+- Grafana: [http://localhost:3000](http://localhost:3000)
+- Locust: [http://localhost:8089](http://localhost:8089)
+
+The main dashboard JSON lives at [docs/grafana_dashboard.json](docs/grafana_dashboard.json). Import it from Grafana's **Dashboards > New > Import** screen if it is not already present.
+
+Run a headless smoke scenario:
+
+```bash
+LOCUST_SCENARIO=single_non_fraudulent_order LOCUST_RUN_ID=single-smoke \
+  locust -f tests/locust/e2e.py \
+  --host http://localhost:8081 \
+  --headless \
+  --users 1 \
+  --spawn-rate 1 \
+  --run-time 30s \
+  --csv tests/locust/results/single_non_fraudulent_order \
+  --html tests/locust/results/single_non_fraudulent_order.html
+```
+
+Use the low-stock E2E override for same-book conflict testing:
+
+```bash
+LOCUST_SCENARIO=same_book_conflict_low_stock LOCUST_RUN_ID=conflict-local \
+  docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml --profile e2e up --build
+```
+
+See [docs/evaluation/e2e-observability.md](docs/evaluation/e2e-observability.md) and [tests/locust/README.md](tests/locust/README.md) for the full scenario matrix and dashboard interpretation guide.
 
 ## Project Structure
 
