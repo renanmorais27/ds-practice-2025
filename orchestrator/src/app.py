@@ -31,8 +31,18 @@ import json
 import grpc
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
+
+from opentelemetry import trace, metrics
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.sdk.resources import Resource
 
 project_root = os.path.abspath(os.path.join(FILE, "../../.."))
 sys.path.insert(0, project_root)
@@ -52,6 +62,46 @@ from utils.vector_clock import (
 )
 
 logging.basicConfig(level=logging.INFO)
+
+_otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://observability:4318")
+_service_name = os.environ.get("OTEL_SERVICE_NAME", "orchestrator")
+_resource = Resource.create({"service.name": _service_name})
+
+_tracer_provider = TracerProvider(resource=_resource)
+_tracer_provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{_otel_endpoint}/v1/traces"))
+)
+trace.set_tracer_provider(_tracer_provider)
+
+_meter_provider = MeterProvider(
+    resource=_resource,
+    metric_readers=[PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint=f"{_otel_endpoint}/v1/metrics"),
+        export_interval_millis=5000,
+    )],
+)
+metrics.set_meter_provider(_meter_provider)
+
+tracer = trace.get_tracer(_service_name)
+meter = metrics.get_meter(_service_name)
+
+requests_counter = meter.create_counter(
+    "requests_counter_total",
+    description="Total number of checkout requests processed",
+)
+checkout_duration = meter.create_histogram(
+    "checkout_duration_seconds",
+    description="Duration of checkout requests in seconds",
+    unit="s",
+)
+active_orders = meter.create_up_down_counter(
+    "active_orders",
+    description="Number of orders currently pending execution",
+)
+denied_orders_counter = meter.create_counter(
+    "denied_orders_total",
+    description="Total number of denied orders",
+)
 
 
 def _metadata(order_id, clock):
@@ -217,6 +267,19 @@ order_statuses = {}
 _status_lock = threading.Lock()
 
 
+def _pending_orders_callback(_options):
+    with _status_lock:
+        count = sum(1 for v in order_statuses.values() if v.get("state") == "pending")
+    yield metrics.Observation(count, {})
+
+
+meter.create_observable_gauge(
+    "pending_orders_gauge",
+    callbacks=[_pending_orders_callback],
+    description="Current number of orders waiting for 2PC outcome",
+)
+
+
 def _set_status(order_id, state, reason="", extra=None):
     with _status_lock:
         entry = order_statuses.get(order_id, {})
@@ -253,6 +316,7 @@ def order_outcome():
     if not order_id or outcome not in ("committed", "aborted"):
         return jsonify({"error": "missing orderId or bad outcome"}), 400
     _set_status(order_id, outcome, reason)
+    active_orders.add(-1, {"job": "orchestrator", "outcome": outcome})
     logging.info("[%s] 2PC outcome recorded: %s (%s)", order_id, outcome, reason)
     return jsonify({"ok": True})
 
@@ -260,192 +324,202 @@ def order_outcome():
 @app.route("/checkout", methods=["POST"])
 def checkout():
     """Process a checkout request through a partially ordered pipeline with vector clocks."""
-    request_data = json.loads(request.data)
-    logging.info(
-        "Checkout request received with %d items",
-        len(request_data.get("items", [])),
-    )
+    with tracer.start_as_current_span("checkout") as checkout_span:
+        _t0 = time.time()
+        request_data = json.loads(request.data)
+        num_items = len(request_data.get("items", []))
+        checkout_span.set_attribute("order.items_count", num_items)
+        logging.info("Checkout request received with %d items", num_items)
 
-    order_id = str(uuid4())
-    vector_clock = new_clock()
-    event_trace = []
+        order_id = str(uuid4())
+        checkout_span.set_attribute("order.id", order_id)
+        vector_clock = new_clock()
+        event_trace = []
 
-    # ── Orchestrator events: receive + create order ID ──
-    vector_clock = tick(vector_clock, "orchestrator")
-    record_event(event_trace, vector_clock, "orchestrator", "checkout_request_received")
-    vector_clock = tick(vector_clock, "orchestrator")
-    record_event(event_trace, vector_clock, "orchestrator", "order_id_created")
+        def _record_result(status):
+            dur = time.time() - _t0
+            requests_counter.add(1, {"job": "orchestrator", "status": status})
+            checkout_duration.record(dur, {"job": "orchestrator", "status": status})
 
-    # ── Stage 1: Parallel init (same parent clock snapshot for true concurrency) ──
-    init_clock = dict(vector_clock)  # snapshot — all three get the SAME clock
-
-    executor = ThreadPoolExecutor(max_workers=4)
-    try:
-        record_event(event_trace, init_clock, "orchestrator", "dispatch_init_rpcs")
-
-        future_tv = executor.submit(
-            initialize_transaction_verification, request_data, order_id, init_clock
-        )
-        future_fd = executor.submit(
-            initialize_fraud_detection, request_data, order_id, init_clock
-        )
-        future_sg = executor.submit(
-            initialize_suggestions, request_data.get("items", []), order_id, init_clock
-        )
-
-        init_futures = {
-            future_tv: "transaction_verification",
-            future_fd: "fraud_detection",
-            future_sg: "suggestions",
-        }
-
-        # Wait for all inits, fail fast on any error
-        for future in as_completed(init_futures):
-            service_name = init_futures[future]
-            try:
-                service_clock, service_trace = future.result()
-                event_trace.extend(service_trace)
-                vector_clock = merge_clocks(vector_clock, service_clock)
-                vector_clock = tick(vector_clock, "orchestrator")
-                record_event(
-                    event_trace, vector_clock, "orchestrator",
-                    f"{service_name}_initialized",
-                )
-            except Exception as exc:
-                # Cancel remaining init futures
-                for f in init_futures:
-                    if f is not future:
-                        f.cancel()
-                vector_clock = tick(vector_clock, "orchestrator")
-                record_event(
-                    event_trace, vector_clock, "orchestrator",
-                    f"{service_name}_initialization_failed",
-                )
-                logging.error("[%s] Init failed for %s: %s", order_id, service_name, exc)
-                result = _deny_response(
-                    order_id,
-                    f"{service_name} initialization failed: {exc}",
-                    vector_clock,
-                    event_trace,
-                )
-                # Clear broadcast even on init failure
-                broadcast_clear(order_id, vector_clock)
-                return result
-
-        logging.info("[%s] All services initialized, starting verification flow", order_id)
-
-        # ── Stage 2: Execution via StartVerificationFlow ──
+        # ── Orchestrator events: receive + create order ID ──
         vector_clock = tick(vector_clock, "orchestrator")
-        record_event(
-            event_trace, vector_clock, "orchestrator",
-            "dispatch_start_verification_flow",
-        )
+        record_event(event_trace, vector_clock, "orchestrator", "checkout_request_received")
+        vector_clock = tick(vector_clock, "orchestrator")
+        record_event(event_trace, vector_clock, "orchestrator", "order_id_created")
 
+        # ── Stage 1: Parallel init (same parent clock snapshot for true concurrency) ──
+        init_clock = dict(vector_clock)  # snapshot — all three get the SAME clock
+
+        executor = ThreadPoolExecutor(max_workers=4)
         try:
-            with grpc.insecure_channel("transaction_verification:50052") as channel:
-                stub = tv_grpc.TransactionVerificationServiceStub(channel)
-                res, call = stub.StartVerificationFlow.with_call(
-                    tv_pb2.Empty(), metadata=_metadata(order_id, vector_clock)
+            with tracer.start_as_current_span("init_services") as init_span:
+                init_span.set_attribute("order.id", order_id)
+                record_event(event_trace, init_clock, "orchestrator", "dispatch_init_rpcs")
+
+                future_tv = executor.submit(
+                    initialize_transaction_verification, request_data, order_id, init_clock
                 )
-            meta = metadata_to_dict(call.trailing_metadata())
-            service_clock = deserialize_clock(meta.get(VECTOR_CLOCK_METADATA_KEY))
-            service_trace = deserialize_trace(meta.get(EVENT_TRACE_METADATA_KEY))
-            books_payload = meta.get(SUGGESTED_BOOKS_METADATA_KEY, "[]")
-
-            event_trace.extend(service_trace)
-            vector_clock = merge_clocks(vector_clock, service_clock)
-            vector_clock = tick(vector_clock, "orchestrator")
-
-            if not res.is_valid:
-                record_event(
-                    event_trace, vector_clock, "orchestrator", "checkout_denied",
+                future_fd = executor.submit(
+                    initialize_fraud_detection, request_data, order_id, init_clock
                 )
-                result = _deny_response(
-                    order_id,
-                    res.message or "Verification failed",
-                    vector_clock,
-                    event_trace,
+                future_sg = executor.submit(
+                    initialize_suggestions, request_data.get("items", []), order_id, init_clock
                 )
-                broadcast_clear(order_id, vector_clock)
-                return result
 
-            # Verification passed — hand the order off to the executor for 2PC.
-            # Stock enforcement and the dummy payment now happen inside the executor-driven
-            # commitment protocol, so the orchestrator no longer mutates stock on this path.
-            # The HTTP response returns "accepted" immediately; the frontend polls
-            # /order-status/<order_id> until the executor posts a committed/aborted outcome.
-            suggested_books = json.loads(books_payload)
-            items = request_data.get("items", [])
+                init_futures = {
+                    future_tv: "transaction_verification",
+                    future_fd: "fraud_detection",
+                    future_sg: "suggestions",
+                }
 
-            try:
-                oq_items = [
-                    oq_pb2.BookItem(title=item.get("name", ""), quantity=item.get("quantity", 0))
-                    for item in items
-                ]
-                with grpc.insecure_channel("order_queue:50054") as oq_channel:
-                    oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
-                    enqueue_res = oq_stub.Enqueue(
-                        oq_pb2.EnqueueRequest(orderId=order_id, items=oq_items), timeout=5
-                    )
-                    if not enqueue_res.success:
-                        raise RuntimeError("Order queue rejected enqueue")
+                # Wait for all inits, fail fast on any error
+                for future in as_completed(init_futures):
+                    svc = init_futures[future]
+                    try:
+                        service_clock, service_trace = future.result()
+                        event_trace.extend(service_trace)
+                        vector_clock = merge_clocks(vector_clock, service_clock)
+                        vector_clock = tick(vector_clock, "orchestrator")
+                        record_event(
+                            event_trace, vector_clock, "orchestrator",
+                            f"{svc}_initialized",
+                        )
+                    except Exception as exc:
+                        for f in init_futures:
+                            if f is not future:
+                                f.cancel()
+                        vector_clock = tick(vector_clock, "orchestrator")
+                        record_event(
+                            event_trace, vector_clock, "orchestrator",
+                            f"{svc}_initialization_failed",
+                        )
+                        logging.error("[%s] Init failed for %s: %s", order_id, svc, exc)
+                        _record_result("Order Denied")
+                        denied_orders_counter.add(1, {"job": "orchestrator", "reason": "init_failed"})
+                        result = _deny_response(
+                            order_id,
+                            f"{svc} initialization failed: {exc}",
+                            vector_clock,
+                            event_trace,
+                        )
+                        broadcast_clear(order_id, vector_clock)
+                        return result
 
-                # Seed the status entry AFTER a successful enqueue so the frontend only
-                # polls for orders the executor will actually see.
-                _set_status(
-                    order_id, "pending", "",
-                    extra={"suggestedBooks": suggested_books},
-                )
-                logging.info("[%s] Order enqueued, awaiting 2PC outcome", order_id)
-                vector_clock = tick(vector_clock, "orchestrator")
-                record_event(
-                    event_trace, vector_clock, "orchestrator", "order_enqueued",
-                )
-            except Exception as enq_exc:
-                logging.error("[%s] Failed to enqueue order: %s", order_id, enq_exc)
-                vector_clock = tick(vector_clock, "orchestrator")
-                record_event(
-                    event_trace, vector_clock, "orchestrator", "order_enqueue_failed",
-                )
-                result = _deny_response(
-                    order_id,
-                    f"Order could not be enqueued: {enq_exc}",
-                    vector_clock,
-                    event_trace,
-                )
-                broadcast_clear(order_id, vector_clock)
-                return result
+            logging.info("[%s] All services initialized, starting verification flow", order_id)
 
-            record_event(
-                event_trace, vector_clock, "orchestrator", "checkout_response_ready",
-            )
-
-            result = {
-                "orderId": order_id,
-                "status": "accepted",
-                "reason": "Transaction valid; awaiting distributed commit",
-                "suggestedBooks": suggested_books,
-                "vectorClock": vector_clock,
-                "eventTrace": event_trace,
-            }
-            broadcast_clear(order_id, vector_clock)
-            return result
-
-        except Exception as exc:
-            logging.error("[%s] StartVerificationFlow error: %s", order_id, exc)
+            # ── Stage 2: Execution via StartVerificationFlow ──
             vector_clock = tick(vector_clock, "orchestrator")
             record_event(
                 event_trace, vector_clock, "orchestrator",
-                "verification_flow_error",
+                "dispatch_start_verification_flow",
             )
-            result = _deny_response(
-                order_id, str(exc), vector_clock, event_trace
-            )
-            broadcast_clear(order_id, vector_clock)
-            return result
 
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+            try:
+                with grpc.insecure_channel("transaction_verification:50052") as channel:
+                    stub = tv_grpc.TransactionVerificationServiceStub(channel)
+                    res, call = stub.StartVerificationFlow.with_call(
+                        tv_pb2.Empty(), metadata=_metadata(order_id, vector_clock)
+                    )
+                meta = metadata_to_dict(call.trailing_metadata())
+                service_clock = deserialize_clock(meta.get(VECTOR_CLOCK_METADATA_KEY))
+                service_trace = deserialize_trace(meta.get(EVENT_TRACE_METADATA_KEY))
+                books_payload = meta.get(SUGGESTED_BOOKS_METADATA_KEY, "[]")
+
+                event_trace.extend(service_trace)
+                vector_clock = merge_clocks(vector_clock, service_clock)
+                vector_clock = tick(vector_clock, "orchestrator")
+
+                if not res.is_valid:
+                    record_event(
+                        event_trace, vector_clock, "orchestrator", "checkout_denied",
+                    )
+                    _record_result("Order Denied")
+                    denied_orders_counter.add(1, {"job": "orchestrator", "reason": "verification_failed"})
+                    result = _deny_response(
+                        order_id,
+                        res.message or "Verification failed",
+                        vector_clock,
+                        event_trace,
+                    )
+                    broadcast_clear(order_id, vector_clock)
+                    return result
+
+                # Verification passed — hand the order off to the executor for 2PC.
+                suggested_books = json.loads(books_payload)
+                items = request_data.get("items", [])
+
+                try:
+                    oq_items = [
+                        oq_pb2.BookItem(title=item.get("name", ""), quantity=item.get("quantity", 0))
+                        for item in items
+                    ]
+                    with grpc.insecure_channel("order_queue:50054") as oq_channel:
+                        oq_stub = oq_grpc.OrderQueueServiceStub(oq_channel)
+                        enqueue_res = oq_stub.Enqueue(
+                            oq_pb2.EnqueueRequest(orderId=order_id, items=oq_items), timeout=5
+                        )
+                        if not enqueue_res.success:
+                            raise RuntimeError("Order queue rejected enqueue")
+
+                    _set_status(
+                        order_id, "pending", "",
+                        extra={"suggestedBooks": suggested_books},
+                    )
+                    active_orders.add(1, {"job": "orchestrator"})
+                    logging.info("[%s] Order enqueued, awaiting 2PC outcome", order_id)
+                    vector_clock = tick(vector_clock, "orchestrator")
+                    record_event(
+                        event_trace, vector_clock, "orchestrator", "order_enqueued",
+                    )
+                except Exception as enq_exc:
+                    logging.error("[%s] Failed to enqueue order: %s", order_id, enq_exc)
+                    vector_clock = tick(vector_clock, "orchestrator")
+                    record_event(
+                        event_trace, vector_clock, "orchestrator", "order_enqueue_failed",
+                    )
+                    _record_result("Order Denied")
+                    denied_orders_counter.add(1, {"job": "orchestrator", "reason": "enqueue_failed"})
+                    result = _deny_response(
+                        order_id,
+                        f"Order could not be enqueued: {enq_exc}",
+                        vector_clock,
+                        event_trace,
+                    )
+                    broadcast_clear(order_id, vector_clock)
+                    return result
+
+                record_event(
+                    event_trace, vector_clock, "orchestrator", "checkout_response_ready",
+                )
+                _record_result("Order Approved")
+                result = {
+                    "orderId": order_id,
+                    "status": "accepted",
+                    "reason": "Transaction valid; awaiting distributed commit",
+                    "suggestedBooks": suggested_books,
+                    "vectorClock": vector_clock,
+                    "eventTrace": event_trace,
+                }
+                broadcast_clear(order_id, vector_clock)
+                return result
+
+            except Exception as exc:
+                logging.error("[%s] StartVerificationFlow error: %s", order_id, exc)
+                vector_clock = tick(vector_clock, "orchestrator")
+                record_event(
+                    event_trace, vector_clock, "orchestrator",
+                    "verification_flow_error",
+                )
+                _record_result("Order Denied")
+                denied_orders_counter.add(1, {"job": "orchestrator", "reason": "verification_error"})
+                result = _deny_response(
+                    order_id, str(exc), vector_clock, event_trace
+                )
+                broadcast_clear(order_id, vector_clock)
+                return result
+
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":

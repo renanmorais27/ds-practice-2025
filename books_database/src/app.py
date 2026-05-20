@@ -3,9 +3,19 @@ import os
 import json
 import threading
 import logging
+import time
 from concurrent import futures
 
 import grpc
+
+from opentelemetry import trace, metrics
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.sdk.resources import Resource
 
 FILE = __file__ if "__file__" in globals() else os.getenv("PYTHONFILE", "")
 
@@ -20,9 +30,45 @@ REPLICA_ROLE = os.environ.get("REPLICA_ROLE", "backup")  # "primary" or "backup"
 BACKUP_ADDRS = os.environ.get("BACKUP_ADDRS", "")        # comma-separated, primary only
 JOURNAL_PATH = os.environ.get("BOOKS_DB_JOURNAL", "")     # if set, persist _tx across restarts
 
+_otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://observability:4318")
+_service_name = os.environ.get("OTEL_SERVICE_NAME", "books_database")
+_resource = Resource.create({"service.name": _service_name})
+
+_tracer_provider = TracerProvider(resource=_resource)
+_tracer_provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{_otel_endpoint}/v1/traces"))
+)
+trace.set_tracer_provider(_tracer_provider)
+
+_meter_provider = MeterProvider(
+    resource=_resource,
+    metric_readers=[PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint=f"{_otel_endpoint}/v1/metrics"),
+        export_interval_millis=5000,
+    )],
+)
+metrics.set_meter_provider(_meter_provider)
+
+tracer = trace.get_tracer(_service_name)
+meter = metrics.get_meter(_service_name)
+
+db_operations_counter = meter.create_counter(
+    "db_operations_total",
+    description="Total number of database operations (prepare/commit/abort/read/write)",
+)
+staged_tx_counter = meter.create_up_down_counter(
+    "staged_transactions",
+    description="Number of transactions currently in STAGED state",
+)
+operation_duration = meter.create_histogram(
+    "db_operation_duration_seconds",
+    description="Duration of database operations in seconds",
+    unit="s",
+)
+
 INITIAL_STOCK = {
-    "Distributed systems.": 3,
-    "Introduction to gRPC.": 5,
+    "Distributed systems.": 5000,
+    "Introduction to gRPC.": 5000,
 }
 
 STAGED, COMMITTED, ABORTED = "staged", "committed", "aborted"
@@ -88,8 +134,11 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
             logging.warning("journal write failed: %s", e)
 
     def Read(self, request, context):
+        _t0 = time.time()
         with self._lock:
             stock = self.store.get(request.title, 0)
+        db_operations_counter.add(1, {"operation": "read", "role": REPLICA_ROLE})
+        operation_duration.record(time.time() - _t0, {"operation": "read"})
         logging.info("Read '%s' -> stock=%d", request.title, stock)
         return db_pb2.ReadResponse(stock=stock)
 
@@ -109,83 +158,93 @@ class BooksDatabaseServicer(db_grpc.BooksDatabaseServicer):
     # ── 2PC participant ──
 
     def Prepare(self, request, context):
-        # Validate inputs at the boundary.
-        for item in request.items:
-            if item.quantity <= 0:
-                return db_pb2.PrepareStockResponse(
-                    ready=False, reason=f"invalid quantity for '{item.title}'",
-                )
+        _t0 = time.time()
+        with tracer.start_as_current_span("db.prepare") as span:
+            span.set_attribute("order.id", request.order_id)
+            span.set_attribute("db.items_count", len(request.items))
 
-        with self._lock:
-            prior = self._tx.get(request.order_id)
-            if prior is not None:
-                # Idempotent re-Prepare: return the stored verdict.
-                state, _ = prior
-                return db_pb2.PrepareStockResponse(ready=(state == STAGED))
-
-            # Simple feasibility check: current stock must cover this order.
-            # Prototype assumes one in-flight tx at a time (single executor leader drives 2PC),
-            # so we don't need concurrent-prepare reservation accounting.
             for item in request.items:
-                if self.store.get(item.title, 0) < item.quantity:
-                    # Tombstone so a retry won't flip the verdict.
-                    self._tx[request.order_id] = (ABORTED, [])
-                    self._persist_journal_locked()
-                    logging.info(
-                        "Prepare %s: insufficient '%s' (have %d, need %d)",
-                        request.order_id, item.title,
-                        self.store.get(item.title, 0), item.quantity,
-                    )
+                if item.quantity <= 0:
+                    db_operations_counter.add(1, {"operation": "prepare", "result": "invalid"})
+                    operation_duration.record(time.time() - _t0, {"operation": "prepare"})
                     return db_pb2.PrepareStockResponse(
-                        ready=False, reason=f"insufficient '{item.title}'",
+                        ready=False, reason=f"invalid quantity for '{item.title}'",
                     )
 
-            staged = [(i.title, i.quantity) for i in request.items]
-            self._tx[request.order_id] = (STAGED, staged)
-            # Journal the STAGED entry BEFORE returning ready=true.
-            self._persist_journal_locked()
+            with self._lock:
+                prior = self._tx.get(request.order_id)
+                if prior is not None:
+                    state, _ = prior
+                    db_operations_counter.add(1, {"operation": "prepare", "result": "idempotent"})
+                    operation_duration.record(time.time() - _t0, {"operation": "prepare"})
+                    return db_pb2.PrepareStockResponse(ready=(state == STAGED))
 
-        logging.info("Prepare %s: STAGED items=%s", request.order_id, staged)
-        return db_pb2.PrepareStockResponse(ready=True)
+                for item in request.items:
+                    if self.store.get(item.title, 0) < item.quantity:
+                        self._tx[request.order_id] = (ABORTED, [])
+                        self._persist_journal_locked()
+                        logging.info(
+                            "Prepare %s: insufficient '%s' (have %d, need %d)",
+                            request.order_id, item.title,
+                            self.store.get(item.title, 0), item.quantity,
+                        )
+                        db_operations_counter.add(1, {"operation": "prepare", "result": "insufficient_stock"})
+                        operation_duration.record(time.time() - _t0, {"operation": "prepare"})
+                        return db_pb2.PrepareStockResponse(
+                            ready=False, reason=f"insufficient '{item.title}'",
+                        )
+
+                staged = [(i.title, i.quantity) for i in request.items]
+                self._tx[request.order_id] = (STAGED, staged)
+                self._persist_journal_locked()
+
+            staged_tx_counter.add(1, {"role": REPLICA_ROLE})
+            db_operations_counter.add(1, {"operation": "prepare", "result": "staged"})
+            operation_duration.record(time.time() - _t0, {"operation": "prepare"})
+            logging.info("Prepare %s: STAGED items=%s", request.order_id, staged)
+            return db_pb2.PrepareStockResponse(ready=True)
 
     def Commit(self, request, context):
-        # Apply the staged decrement, then release the lock before replicating.
-        # Values to replicate are captured inside the critical section.
-        replicate_values = None
-        with self._lock:
-            entry = self._tx.get(request.order_id)
-            if entry is None or entry[0] != STAGED:
-                # Unknown or already finalized — idempotent no-op.
-                logging.info(
-                    "Commit %s: no-op (entry=%s)", request.order_id, entry,
-                )
-                return db_pb2.CommitResponse(success=True)
-            _, staged = entry
-            for title, qty in staged:
-                self.store[title] = self.store.get(title, 0) - qty
-            self._tx[request.order_id] = (COMMITTED, staged)
-            self._persist_journal_locked()
-            replicate_values = {t: self.store[t] for t, _ in staged}
+        _t0 = time.time()
+        with tracer.start_as_current_span("db.commit") as span:
+            span.set_attribute("order.id", request.order_id)
 
-        logging.info(
-            "Commit %s: decremented store=%s", request.order_id, replicate_values,
-        )
-        # Subclasses (PrimaryReplica) use replicate_values to propagate changes.
-        self._after_commit(replicate_values)
-        return db_pb2.CommitResponse(success=True)
+            replicate_values = None
+            with self._lock:
+                entry = self._tx.get(request.order_id)
+                if entry is None or entry[0] != STAGED:
+                    logging.info("Commit %s: no-op (entry=%s)", request.order_id, entry)
+                    db_operations_counter.add(1, {"operation": "commit", "result": "noop"})
+                    operation_duration.record(time.time() - _t0, {"operation": "commit"})
+                    return db_pb2.CommitResponse(success=True)
+                _, staged = entry
+                for title, qty in staged:
+                    self.store[title] = self.store.get(title, 0) - qty
+                self._tx[request.order_id] = (COMMITTED, staged)
+                self._persist_journal_locked()
+                replicate_values = {t: self.store[t] for t, _ in staged}
+
+            staged_tx_counter.add(-1, {"role": REPLICA_ROLE})
+            db_operations_counter.add(1, {"operation": "commit", "result": "committed"})
+            operation_duration.record(time.time() - _t0, {"operation": "commit"})
+            logging.info("Commit %s: decremented store=%s", request.order_id, replicate_values)
+            self._after_commit(replicate_values)
+            return db_pb2.CommitResponse(success=True)
 
     def Abort(self, request, context):
         with self._lock:
             entry = self._tx.get(request.order_id)
+            was_staged = entry is not None and entry[0] == STAGED
             if entry is None:
-                # Tombstone guards against a late Prepare retry after we've decided Abort.
                 self._tx[request.order_id] = (ABORTED, [])
                 self._persist_journal_locked()
             elif entry[0] == STAGED:
                 self._tx[request.order_id] = (ABORTED, [])
                 self._persist_journal_locked()
-            # Already COMMITTED/ABORTED: leave alone.
 
+        if was_staged:
+            staged_tx_counter.add(-1, {"role": REPLICA_ROLE})
+        db_operations_counter.add(1, {"operation": "abort", "role": REPLICA_ROLE})
         logging.info("Abort %s", request.order_id)
         return db_pb2.AbortResponse(aborted=True)
 
@@ -248,6 +307,17 @@ def serve():
     else:
         servicer = BooksDatabaseServicer()
         logging.info("Starting as BACKUP")
+
+    def _stock_gauge_callback(_options):
+        with servicer._lock:
+            for title, stock in servicer.store.items():
+                yield metrics.Observation(stock, {"book": title, "role": REPLICA_ROLE})
+
+    meter.create_observable_gauge(
+        "book_stock_level",
+        callbacks=[_stock_gauge_callback],
+        description="Current stock level per book title",
+    )
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     db_grpc.add_BooksDatabaseServicer_to_server(servicer, server)
